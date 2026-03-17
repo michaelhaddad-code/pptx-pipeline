@@ -1,0 +1,33 @@
+# Secrets
+.env
+
+# Source PPTX files (large, user-provided)
+*.pptx
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Component library (generated, large binary content)
+component_library/
+component_library_backup_*/
+
+# Output files
+output*.pptx
+output_*.pptx
+
+# Temp files
+~$*.pptx
+*.tmp
+
+# Configs and recipes (generated per-run)
+configs/
+recipes/
+
+# Data (user-provided, not tracked)
+data/
+
+# OS
+Thumbs.db
+.DS_Store

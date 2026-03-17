@@ -1,0 +1,68 @@
+# PPTX Pipeline
+
+An agentic PowerPoint deconstruction-reconstruction pipeline. It decomposes PPTX files into editable components, maps data fields to shapes through conversation, resolves values, injects them into slide XML, and reconstructs the PPTX.
+
+## Pipeline Steps
+
+The pipeline runs as a step-by-step agentic flow. Each step pauses for user review before proceeding.
+
+| Step | Skill | Script | Purpose |
+|------|-------|--------|---------|
+| 1 | `/deconstruct` | `deconstruct.py` | Unzip PPTX, extract shapes, build metadata + manifest JSONs |
+| 2 | `/generate-config` | `generate_config.py` | Classify shapes (dynamic/static), create layout stubs, write config.json |
+| 3 | `/map` | *interactive* | Conversational mapping — present shapes + data to user, agree on field→shape mappings |
+| 4 | `/update-config` | `update_config.py` | Resolve mapped fields with actual data values, compute layouts (fonts, image fit) |
+| 5 | `/inject` | `inject.py` | Apply resolved values to raw XML: text, tables, images, font scaling |
+| 6 | `/reconstruct` | `reconstruct.py` | Repack modified `_raw/` into output PPTX |
+
+Run `/pipeline` to execute all steps in sequence with pauses between each.
+
+## Project Structure
+
+```
+component_library/       # Output of deconstruct
+  _raw/                  # Full PPTX unzipped (modified by inject, rezipped by reconstruct)
+  _raw_clean/            # Pristine backup for idempotent re-injection
+  theme/                 # Theme XMLs (copied from _raw)
+  media/                 # Media assets (copied from _raw)
+  slide_master/          # Slide masters/layouts (copied from _raw)
+  slides/slide_N/        # Per-slide: slide.xml, slide.xml.rels, metadata.json
+  manifest.json          # Global shape inventory
+
+configs/                 # Output of generate-config, updated by map + update-config
+  slides_examples.json   # Shape config: geometry, categories, layout stubs, data_field mappings
+
+data/                    # User-provided data files for injection
+  *.csv, *.json, *.xlsx  # Scalar/tabular data
+  *.png, *.jpg           # Replacement images
+
+recipes/                 # Saved mapping recipes for reuse
+```
+
+## Key Architecture Decisions
+
+- **String-based XML modification**: `inject.py` modifies raw XML strings, never calls `tree.write()`. This preserves exact formatting, namespaces, and declarations.
+- **Layout from template**: All sizing rules (fonts, image fit, table rows) are derived from the template's actual dimensions — no hardcoded magic numbers.
+- **Step 3 is conversational**: Mapping is done interactively between the user and Claude, not by automated fuzzy matching. This ensures accuracy.
+- **EMU units**: PowerPoint uses English Metric Units (1 inch = 914400 EMU, 1 pt = 12700 EMU).
+
+## Running Tests
+
+```bash
+python -m pytest tests/ -q
+```
+
+## Common Commands
+
+```bash
+# Full pipeline with pauses
+/pipeline "Slides Examples.pptx"
+
+# Individual steps
+/deconstruct "Slides Examples.pptx"
+/generate-config
+/map
+/update-config
+/inject
+/reconstruct output.pptx
+```

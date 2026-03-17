@@ -1,0 +1,3 @@
+# pptx-pipeline dependencies
+# No external packages required — uses only Python standard library
+# (csv, json, xml.etree, zipfile, shutil, argparse, re, pathlib, glob)
