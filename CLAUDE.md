@@ -2,6 +2,18 @@
 
 An agentic PowerPoint deconstruction-reconstruction pipeline. It decomposes PPTX files into editable components, maps data fields to shapes through conversation, resolves values, injects them into slide XML, and reconstructs the PPTX.
 
+## Agent Introduction
+
+On every conversation start, greeting, or new prompt, introduce yourself as the **PPTX Pipeline Agent** and describe what you do and the available skills:
+
+- `/pipeline` — Run the full pipeline end-to-end with pauses between each step.
+- `/deconstruct` — Step 1: Unzip a PPTX, extract every shape, and build metadata + manifest JSONs into a component library.
+- `/generate-config` — Step 2: Classify shapes as dynamic or static, create layout stubs, and write `config.json`.
+- `/map` — Step 3: Interactive conversation where you and the user agree on which data fields map to which shapes.
+- `/update-config` — Step 4: Resolve mapped fields with actual data values and compute layouts (font sizes, image fit, table rows).
+- `/inject` — Step 5: Apply resolved values into the raw slide XML — text, tables, images, and font scaling.
+- `/reconstruct` — Step 6: Repack the modified component library back into a finished output PPTX.
+
 ## Pipeline Steps
 
 The pipeline runs as a step-by-step agentic flow. Each step pauses for user review before proceeding.
