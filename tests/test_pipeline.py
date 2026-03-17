@@ -43,11 +43,8 @@ from layout import (
 )
 from update_config import resolve_token, resolve_field, load_data_sources, update_config, _load_xlsx, find_screenshots
 from generate_config import (
-    looks_dynamic,
-    looks_static,
     get_shape_category,
     generate_config,
-    DEFAULT_DYNAMIC_HINTS,
     STRUCTURAL_TYPES,
 )
 from reconstruct import reconstruct
@@ -342,41 +339,6 @@ class TestLoadDataSourcesCsv(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════════════════════
 # 3. generate_config.py tests
 # ═══════════════════════════════════════════════════════════════════════════
-
-class TestLooksDynamic(unittest.TestCase):
-    """Tests for looks_dynamic."""
-
-    def test_looks_dynamic_hit(self):
-        shape = {"text_preview": "Revenue xxx this quarter"}
-        self.assertTrue(looks_dynamic(shape, DEFAULT_DYNAMIC_HINTS))
-
-    def test_looks_dynamic_miss(self):
-        shape = {"text_preview": "Company Overview"}
-        self.assertFalse(looks_dynamic(shape, DEFAULT_DYNAMIC_HINTS))
-
-
-class TestLooksStatic(unittest.TestCase):
-    """Tests for looks_static."""
-
-    def test_looks_static_oval(self):
-        shape = {"name": "Oval 3", "type": "sp"}
-        self.assertTrue(looks_static(shape))
-
-    def test_looks_static_connector(self):
-        shape = {"name": "Connector: Elbow 12", "type": "sp"}
-        self.assertTrue(looks_static(shape))
-
-    def test_looks_static_straight_connector(self):
-        shape = {"name": "Straight Connector 5", "type": "sp"}
-        self.assertTrue(looks_static(shape))
-
-    def test_looks_static_structural_type(self):
-        shape = {"name": "Whatever", "type": "cxnSp"}
-        self.assertTrue(looks_static(shape))
-
-    def test_looks_static_normal_shape(self):
-        shape = {"name": "TextBox 1", "type": "sp"}
-        self.assertFalse(looks_static(shape))
 
 
 class TestGetShapeCategory(unittest.TestCase):
@@ -945,12 +907,11 @@ class TestGenerateConfigEndToEnd(unittest.TestCase):
         self.assertIn("slide_1", config["slides"])
         slide = config["slides"]["slide_1"]
 
-        # Title shape should be flagged as dynamic (contains "xxx")
+        # All shapes start as not dynamic (user classifies interactively)
         title = [s for s in slide["shapes"] if s["shape_name"] == "Title"]
         self.assertEqual(len(title), 1)
-        self.assertTrue(title[0]["is_dynamic"])
+        self.assertFalse(title[0]["is_dynamic"])
 
-        # Oval should be static (matches STATIC_NAME_PATTERNS)
         oval = [s for s in slide["shapes"] if s["shape_name"] == "Oval 5"]
         self.assertEqual(len(oval), 1)
         self.assertFalse(oval[0]["is_dynamic"])

@@ -1,8 +1,10 @@
 """
 Step 2: GENERATE CONFIG
 Reads the component library and produces a config.json describing every slide.
+All shapes are listed neutrally — classification as dynamic/static happens
+interactively in Step 3 (Map) when the user brings their data.
 Runs once per deck. If config already exists, skips generation (unless --force).
-Usage: python generate_config.py [--library_dir DIR] [--configs_dir DIR] [--force] [--hints FILE]
+Usage: python generate_config.py [--library_dir DIR] [--configs_dir DIR] [--force]
 """
 
 import argparse
@@ -14,47 +16,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-# Shape types that are purely structural — never dynamic
+# Shape types that are purely structural (group wrappers, connectors) — excluded from config
 STRUCTURAL_TYPES = {"nvGrpSpPr", "grpSpPr", "cxnSp"}
-
-# Shape name patterns that are likely static design elements
-STATIC_NAME_PATTERNS = ["Oval", "Connector", "Straight Connector"]
-
-# Default text previews that look like dynamic placeholders
-DEFAULT_DYNAMIC_HINTS = [
-    "xxx", "$XX", "$YY", "$AA", "$ZZ", "NN ", "A/B", "as of",
-    "##", "TBD", "N/A", "XX%", "YY%", "$0", "0.0",
-    "YYYY", "MM/DD", "Q1", "Q2", "Q3", "Q4",
-    "{{", "}}", "[placeholder]", "[TBD]", "[date]",
-    "lorem", "ipsum", "sample", "example",
-]
-
-
-def load_dynamic_hints(hints_file: str = None) -> list:
-    """Load dynamic hints from an optional JSON file, falling back to defaults."""
-    hints = list(DEFAULT_DYNAMIC_HINTS)
-    if hints_file and os.path.exists(hints_file):
-        with open(hints_file) as f:
-            custom_hints = json.load(f)
-        if isinstance(custom_hints, list):
-            hints.extend(custom_hints)
-        else:
-            logger.warning("Warning: hints file %s should contain a JSON array of strings. Ignoring.", hints_file)
-    return hints
-
-
-def looks_dynamic(shape: dict, dynamic_hints: list) -> bool:
-    """Heuristic — flag shapes that look like they contain weekly data."""
-    text = shape.get("text_preview", "")
-    return any(hint.lower() in text.lower() for hint in dynamic_hints)
-
-
-def looks_static(shape: dict) -> bool:
-    """Heuristic — flag shapes that are structural or design-only."""
-    if shape.get("type") in STRUCTURAL_TYPES:
-        return True
-    name = shape.get("name", "")
-    return any(pattern in name for pattern in STATIC_NAME_PATTERNS)
 
 
 def get_shape_category(shape: dict) -> str:
@@ -177,10 +140,7 @@ def generate_config(
     library_path: str = "component_library",
     configs_dir: str = "configs",
     force: bool = False,
-    hints_file: str = None,
 ):
-    dynamic_hints = load_dynamic_hints(hints_file)
-
     # Load manifest
     manifest_path = os.path.join(library_path, "manifest.json")
     if not os.path.exists(manifest_path):
@@ -224,16 +184,14 @@ def generate_config(
                 continue
 
             category = get_shape_category(shape)
-            dynamic = looks_dynamic(shape, dynamic_hints)
-            static = looks_static(shape)
 
             shape_entry = {
                 "shape_id": shape.get("id", ""),
                 "shape_name": shape.get("name", ""),
                 "category": category,
-                "is_dynamic": dynamic and not static,
+                "is_dynamic": False,  # user defines this interactively in Step 3 (Map)
                 "text_preview": shape.get("text_preview", ""),
-                "data_field": "",  # field name in data files (e.g. "revenue", "metrics.total")
+                "data_field": "",  # set during mapping
             }
 
             # Geometry (position + size in EMU)
@@ -272,8 +230,8 @@ def generate_config(
                 img_rel = {
                     "rid": rid,
                     "target": rel["target"],
-                    "is_dynamic": False,
-                    "source": "",
+                    "is_dynamic": False,  # user defines this in Step 3 (Map)
+                    "source": "",  # set during mapping
                 }
                 if rid in rid_to_shape:
                     img_rel["target_shape_id"] = rid_to_shape[rid]
@@ -286,15 +244,14 @@ def generate_config(
             "images": relationships
         }
 
-        dynamic_count = sum(1 for s in shapes_config if s["is_dynamic"])
-        logger.info("  Slide %d: %d shapes (%d flagged as dynamic)", slide_num, len(shapes_config), dynamic_count)
+        logger.info("  Slide %d: %d shapes", slide_num, len(shapes_config))
 
     # Save config
     with open(config_path, "w") as f:
         json.dump(config, f, indent=2)
 
     logger.info("\nConfig generated: %s", config_path)
-    logger.info("   Review and fill in 'data_field' for dynamic shapes.")
+    logger.info("   Run Step 3 (Map) to interactively classify shapes and assign data fields.")
 
     return config_path
 
@@ -318,11 +275,6 @@ def parse_args():
         action="store_true",
         help="Overwrite existing config file if it already exists",
     )
-    parser.add_argument(
-        "--hints",
-        default=None,
-        help="Path to an optional JSON file containing additional dynamic hint strings",
-    )
     return parser.parse_args()
 
 
@@ -332,5 +284,4 @@ if __name__ == "__main__":
         library_path=args.library_dir,
         configs_dir=args.configs_dir,
         force=args.force,
-        hints_file=args.hints,
     )
