@@ -13,7 +13,8 @@ Resolve all mapped data fields with actual values and compute layouts.
 1. Run update_config with logging:
 
 ```python
-import logging
+import sys, logging
+sys.path.insert(0, "src")
 logging.basicConfig(level=logging.INFO)
 from update_config import update_config
 result = update_config("configs/slides_examples.json", "data")

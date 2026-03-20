@@ -19,6 +19,11 @@ import os
 import shutil
 import sys
 
+# Ensure src/ is on the import path when run as a script
+_src_dir = os.path.dirname(os.path.abspath(__file__))
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
+
 logger = logging.getLogger(__name__)
 
 

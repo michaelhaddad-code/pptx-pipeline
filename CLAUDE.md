@@ -20,18 +20,27 @@ The pipeline runs as a step-by-step agentic flow. Each step pauses for user revi
 
 | Step | Skill | Script | Purpose |
 |------|-------|--------|---------|
-| 1 | `/deconstruct` | `deconstruct.py` | Unzip PPTX, extract shapes, build metadata + manifest JSONs |
-| 2 | `/generate-config` | `generate_config.py` | Classify shapes (dynamic/static), create layout stubs, write config.json |
+| 1 | `/deconstruct` | `src/deconstruct.py` | Unzip PPTX, extract shapes, build metadata + manifest JSONs |
+| 2 | `/generate-config` | `src/generate_config.py` | Classify shapes (dynamic/static), create layout stubs, write config.json |
 | 3 | `/map` | *interactive* | Conversational mapping — present shapes + data to user, agree on field→shape mappings |
-| 4 | `/update-config` | `update_config.py` | Resolve mapped fields with actual data values, compute layouts (fonts, image fit) |
-| 5 | `/inject` | `inject.py` | Apply resolved values to raw XML: text, tables, images, font scaling |
-| 6 | `/reconstruct` | `reconstruct.py` | Repack modified `_raw/` into output PPTX |
+| 4 | `/update-config` | `src/update_config.py` | Resolve mapped fields with actual data values, compute layouts (fonts, image fit) |
+| 5 | `/inject` | `src/inject.py` | Apply resolved values to raw XML: text, tables, images, font scaling |
+| 6 | `/reconstruct` | `src/reconstruct.py` | Repack modified `_raw/` into output PPTX |
 
 Run `/pipeline` to execute all steps in sequence with pauses between each.
 
 ## Project Structure
 
 ```
+src/                     # Pipeline scripts
+  deconstruct.py         # Step 1: PPTX → component library
+  generate_config.py     # Step 2: component library → config.json
+  update_config.py       # Step 4: resolve data values, compute layouts
+  inject.py              # Step 5: apply values to slide XML
+  reconstruct.py         # Step 6: repack into output PPTX
+  layout.py              # Layout helpers (font scaling, image fit, table rows)
+  run_pipeline.py        # CLI orchestrator for all steps
+
 component_library/       # Output of deconstruct
   _raw/                  # Full PPTX unzipped (modified by inject, rezipped by reconstruct)
   _raw_clean/            # Pristine backup for idempotent re-injection
@@ -53,7 +62,7 @@ recipes/                 # Saved mapping recipes for reuse
 
 ## Key Architecture Decisions
 
-- **String-based XML modification**: `inject.py` modifies raw XML strings, never calls `tree.write()`. This preserves exact formatting, namespaces, and declarations.
+- **String-based XML modification**: `src/inject.py` modifies raw XML strings, never calls `tree.write()`. This preserves exact formatting, namespaces, and declarations.
 - **Layout from template**: All sizing rules (fonts, image fit, table rows) are derived from the template's actual dimensions — no hardcoded magic numbers.
 - **Step 3 is conversational**: Mapping is done interactively between the user and Claude, not by automated fuzzy matching. This ensures accuracy.
 - **EMU units**: PowerPoint uses English Metric Units (1 inch = 914400 EMU, 1 pt = 12700 EMU).

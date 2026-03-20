@@ -850,19 +850,38 @@ def _inject_image_geometry(xml_str: str, shape_id: str, computed: dict,
         shape_xml, count=1
     )
 
-    # Update <a:off x="..." y="..."/> if offsets need adjustment
+    # Update <a:off x="..." y="..."/> for repositioning (auto-stack) or offsets
+    new_x = computed.get("new_x")
+    new_y = computed.get("new_y")
     offset_x = computed.get("offset_x", 0)
     offset_y = computed.get("offset_y", 0)
-    if (offset_x or offset_y) and original_geometry:
-        new_x = original_geometry.get("x", 0) + offset_x
-        new_y = original_geometry.get("y", 0) + offset_y
-        off_pattern = re.compile(
-            r'(<[^>]*?:off\b[^>]*?\bx\s*=\s*")(\d+)("[^>]*?\by\s*=\s*")(\d+)(")'
-        )
-        shape_xml = off_pattern.sub(
-            lambda m: m.group(1) + str(new_x) + m.group(3) + str(new_y) + m.group(5),
-            shape_xml, count=1
-        )
+
+    needs_position_update = (new_x is not None or new_y is not None or
+                             ((offset_x or offset_y) and original_geometry))
+
+    if needs_position_update:
+        if new_x is not None:
+            target_x = new_x
+        elif original_geometry:
+            target_x = original_geometry.get("x", 0) + offset_x
+        else:
+            target_x = None
+
+        if new_y is not None:
+            target_y = new_y
+        elif original_geometry:
+            target_y = original_geometry.get("y", 0) + offset_y
+        else:
+            target_y = None
+
+        if target_x is not None and target_y is not None:
+            off_pattern = re.compile(
+                r'(<[^>]*?:off\b[^>]*?\bx\s*=\s*")(\d+)("[^>]*?\by\s*=\s*")(\d+)(")'
+            )
+            shape_xml = off_pattern.sub(
+                lambda m: m.group(1) + str(target_x) + m.group(3) + str(target_y) + m.group(5),
+                shape_xml, count=1
+            )
 
     xml_str = xml_str[:s_start] + shape_xml + xml_str[s_end:]
     return xml_str
@@ -1325,6 +1344,9 @@ def inject(config_path: str = "configs/slides_examples.json", library_path: str 
                     with open(slide_xml_path, "rb") as f:
                         img_xml_str = f.read().decode("utf-8")
 
+                    # Track shapes that need repositioning (labels from auto-stack)
+                    shapes_to_reposition = []
+
                     for img in images_with_geometry:
                         shape_id = str(img["target_shape_id"])
                         computed = img["_computed"]
@@ -1337,8 +1359,57 @@ def inject(config_path: str = "configs/slides_examples.json", library_path: str 
                         img_xml_str = _inject_image_geometry(
                             img_xml_str, shape_id, computed, original_geo
                         )
-                        logger.info("    [ok] Image shape id=%s: resized to %dx%d EMU",
-                                    shape_id, computed["cx"], computed["cy"])
+                        new_y = computed.get("new_y")
+                        pos_info = f" at y={new_y}" if new_y is not None else ""
+                        logger.info("    [ok] Image shape id=%s: resized to %dx%d EMU%s",
+                                    shape_id, computed["cx"], computed["cy"], pos_info)
+
+                    # Reposition and resize shapes moved by auto-stacking
+                    # (labels, static images, etc.) — config geometry was updated by update_config
+                    for s in slide["shapes"]:
+                        if not s.get("geometry"):
+                            continue
+                        shape_id = str(s.get("shape_id", ""))
+                        new_y = s["geometry"].get("y")
+                        new_cy = s["geometry"].get("cy")
+                        if new_y is None:
+                            continue
+                        span = _find_shape_span(img_xml_str, shape_id)
+                        if not span:
+                            continue
+                        ss, se = span
+                        shape_xml = img_xml_str[ss:se]
+                        modified = False
+
+                        # Update Y position
+                        off_pattern = re.compile(
+                            r'(<[^>]*?:off\b[^>]*?\bx\s*=\s*")(\d+)("[^>]*?\by\s*=\s*")(\d+)(")'
+                        )
+                        m = off_pattern.search(shape_xml)
+                        if m and int(m.group(4)) != new_y:
+                            shape_xml = off_pattern.sub(
+                                lambda m: m.group(1) + m.group(2) + m.group(3) + str(new_y) + m.group(5),
+                                shape_xml, count=1
+                            )
+                            modified = True
+
+                        # Update height (cy) if changed — for static images scaled by stacker
+                        if new_cy is not None:
+                            ext_pattern = re.compile(
+                                r'(<[^>]*?:ext\b[^>]*?\bcx\s*=\s*")(\d+)("[^>]*?\bcy\s*=\s*")(\d+)(")'
+                            )
+                            ext_m = ext_pattern.search(shape_xml)
+                            if ext_m and int(ext_m.group(4)) != new_cy:
+                                shape_xml = ext_pattern.sub(
+                                    lambda m: m.group(1) + m.group(2) + m.group(3) + str(new_cy) + m.group(5),
+                                    shape_xml, count=1
+                                )
+                                modified = True
+
+                        if modified:
+                            img_xml_str = img_xml_str[:ss] + shape_xml + img_xml_str[se:]
+                            logger.info("    [ok] Shape id=%s: repositioned to y=%d, cy=%d",
+                                        shape_id, new_y, new_cy or 0)
 
                     with open(slide_xml_path, "wb") as f:
                         f.write(img_xml_str.encode("utf-8"))

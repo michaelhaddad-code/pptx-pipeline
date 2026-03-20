@@ -17,7 +17,7 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from layout import compute_table_layout, compute_image_fit, compute_text_font_scale, read_image_dimensions
+from layout import compute_table_layout, compute_image_fit, compute_text_font_scale, read_image_dimensions, compute_slide_image_stack
 
 logger = logging.getLogger(__name__)
 
@@ -552,7 +552,8 @@ def update_config(config_path: str, data_dir: str):
                 continue
 
             img_w, img_h = dims
-            fit_mode = layout.get("fit", "stretch")
+            # Default to fit_width so images scale proportionally
+            fit_mode = layout.get("fit", "fit_width")
             anchor = layout.get("anchor", "center")
 
             computed = compute_image_fit(img_w, img_h, max_cx, max_cy, fit=fit_mode, anchor=anchor)
@@ -561,6 +562,166 @@ def update_config(config_path: str, data_dir: str):
                         slide_key, image.get("rid", "?"), img_w, img_h,
                         computed["cx"], computed["cy"],
                         computed["offset_x"], computed["offset_y"], fit_mode)
+
+    # ── Post-resolution: auto-stack images per slide ──
+    # Considers both dynamic and static images to prevent overlaps.
+    for slide_key, slide in config["slides"].items():
+        all_images = slide.get("images", [])
+        dynamic_images = [
+            img for img in all_images
+            if img.get("is_dynamic") and img.get("_computed")
+        ]
+        if not dynamic_images:
+            continue  # no dynamic images to stack
+
+        # Helper: find label shape above an image at a given Y position
+        def _find_label(img_y, used_label_ids):
+            for shape in slide["shapes"]:
+                if shape.get("category") != "text" or not shape.get("geometry"):
+                    continue
+                if shape["shape_id"] in used_label_ids:
+                    continue
+                shape_y = shape["geometry"].get("y", 0)
+                if 0 < (img_y - shape_y) < 600000 and shape.get("text_preview"):
+                    used_label_ids.add(shape["shape_id"])
+                    return {
+                        "shape_id": shape["shape_id"],
+                        "geometry": dict(shape["geometry"]),
+                    }
+            return None
+
+        used_label_ids = set()
+
+        # Build dynamic entries
+        stack_entries = []
+        for image in dynamic_images:
+            target_shape_id = image.get("target_shape_id")
+            if not target_shape_id:
+                continue
+            original_geo = None
+            for shape in slide["shapes"]:
+                if shape.get("shape_id") == target_shape_id:
+                    original_geo = shape.get("geometry")
+                    break
+            if not original_geo:
+                continue
+            img_y = original_geo.get("y", 0)
+            label_shape = _find_label(img_y, used_label_ids)
+            stack_entries.append({
+                "target_shape_id": target_shape_id,
+                "_computed": image["_computed"],
+                "_original_geometry": dict(original_geo),
+                "_label_shape": label_shape,
+            })
+
+        # Build static image entries (non-dynamic images that occupy vertical space)
+        static_entries = []
+        for image in all_images:
+            if image.get("is_dynamic"):
+                continue
+            target_shape_id = image.get("target_shape_id")
+            if not target_shape_id:
+                continue
+            original_geo = None
+            for shape in slide["shapes"]:
+                if shape.get("shape_id") == target_shape_id:
+                    original_geo = shape.get("geometry")
+                    break
+            if not original_geo:
+                continue
+            img_y = original_geo.get("y", 0)
+            label_shape = _find_label(img_y, used_label_ids)
+            static_entries.append({
+                "shape_id": target_shape_id,
+                "geometry": dict(original_geo),
+                "_label_shape": label_shape,
+            })
+
+        if not stack_entries:
+            continue
+
+        stacked = compute_slide_image_stack(stack_entries, static_shapes=static_entries)
+
+        # Apply stacked positions back to the config
+        for result in stacked:
+            shape_id = result["shape_id"]
+
+            if result.get("is_static"):
+                # Update static shape geometry for repositioning and scaling
+                for shape in slide["shapes"]:
+                    if shape.get("shape_id") == shape_id and shape.get("geometry"):
+                        shape["geometry"]["y"] = result["new_y"]
+                        shape["geometry"]["cy"] = result["cy"]
+                        break
+            else:
+                # Update the dynamic image _computed with new dimensions and position
+                for image in dynamic_images:
+                    if image.get("target_shape_id") == shape_id:
+                        image["_computed"]["cy"] = result["cy"]
+                        image["_computed"]["cx"] = result["cx"]
+                        image["_computed"]["new_y"] = result["new_y"]
+                        image["_computed"]["new_x"] = result["new_x"]
+                        break
+
+                # Update the shape's geometry with new position and height
+                for shape in slide["shapes"]:
+                    if shape.get("shape_id") == shape_id and shape.get("geometry"):
+                        shape["geometry"]["y"] = result["new_y"]
+                        shape["geometry"]["cy"] = result["cy"]
+                        break
+
+            # Reposition associated label
+            if result.get("label_shape_id"):
+                for shape in slide["shapes"]:
+                    if shape.get("shape_id") == result["label_shape_id"] and shape.get("geometry"):
+                        shape["geometry"]["y"] = result["label_new_y"]
+                        break
+
+            logger.info("  ok %s -> %s %s: stacked at y=%d, cy=%d (scale=%.2f)",
+                        slide_key, "static" if result.get("is_static") else "image",
+                        shape_id, result["new_y"], result["cy"],
+                        result["scale_factor"])
+
+            # Resize overlay shapes that sit on top of this image
+            # These are shapes whose original Y and cy match the image's original geometry
+            # (e.g. highlight boxes that span table columns)
+            orig_geo = None
+            if result.get("is_static"):
+                # For static, find original geometry from static_entries
+                for se in static_entries:
+                    if se["shape_id"] == shape_id:
+                        orig_geo = se["geometry"]
+                        break
+            else:
+                # For dynamic, find from stack_entries
+                for de in stack_entries:
+                    if de["target_shape_id"] == shape_id:
+                        orig_geo = de["_original_geometry"]
+                        break
+
+            if orig_geo:
+                orig_y = orig_geo.get("y", 0)
+                orig_cy = orig_geo.get("cy", 0)
+                new_y = result["new_y"]
+                new_cy = result["cy"]
+
+                for shape in slide["shapes"]:
+                    if shape.get("shape_id") == shape_id:
+                        continue  # skip the image shape itself
+                    geo = shape.get("geometry")
+                    if not geo:
+                        continue
+                    shape_y = geo.get("y", 0)
+                    shape_cy = geo.get("cy", 0)
+                    # Match: shape's Y is close to image's original Y
+                    # and shape's cy is close to image's original cy
+                    y_close = abs(shape_y - orig_y) < 10000
+                    cy_close = abs(shape_cy - orig_cy) < 10000
+                    if y_close and cy_close:
+                        geo["y"] = new_y
+                        geo["cy"] = new_cy
+                        logger.info("  ok %s -> overlay %s: resized to y=%d, cy=%d",
+                                    slide_key, shape["shape_id"], new_y, new_cy)
 
     # Save updated config
     with open(config_path, "w", encoding='utf-8') as f:

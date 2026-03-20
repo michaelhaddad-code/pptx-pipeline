@@ -16,7 +16,8 @@ Repack the modified component library into an output PPTX.
 1. Run reconstruct with logging:
 
 ```python
-import logging
+import sys, logging
+sys.path.insert(0, "src")
 logging.basicConfig(level=logging.INFO)
 from reconstruct import reconstruct
 output_path = reconstruct("component_library", "$ARGUMENTS")
@@ -30,6 +31,8 @@ output_path = reconstruct("component_library", "$ARGUMENTS")
 3. Optionally run verify against the original:
 
 ```python
+import sys
+sys.path.insert(0, "src")
 from reconstruct import verify
 verify("Slides Examples.pptx", "$ARGUMENTS", "component_library")
 ```

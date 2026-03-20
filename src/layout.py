@@ -159,7 +159,8 @@ def compute_image_fit(img_width_px, img_height_px, max_cx, max_cy,
     Args:
         img_width_px, img_height_px: source image size in pixels
         max_cx, max_cy: bounding box in EMU
-        fit: "contain" (fit within), "cover" (fill, crop), "stretch"
+        fit: "contain" (fit within), "cover" (fill, crop), "stretch",
+             "fit_width" (match width, compute height proportionally)
         anchor: "center", "top-left", "top-center"
 
     Returns:
@@ -173,6 +174,14 @@ def compute_image_fit(img_width_px, img_height_px, max_cx, max_cy,
 
     if fit == "stretch":
         return {"cx": max_cx, "cy": max_cy, "offset_x": 0, "offset_y": 0}
+
+    if fit == "fit_width":
+        # Scale to match shape width, compute height proportionally
+        # No height cap — the auto-stacker handles overflow by scaling all sections
+        scale = max_cx / img_w_emu
+        fit_cx = max_cx
+        fit_cy = int(img_h_emu * scale)
+        return {"cx": fit_cx, "cy": fit_cy, "offset_x": 0, "offset_y": 0}
 
     if fit == "cover":
         scale = max(max_cx / img_w_emu, max_cy / img_h_emu)
@@ -202,6 +211,161 @@ def compute_image_fit(img_width_px, img_height_px, max_cx, max_cy,
         "offset_x": offset_x,
         "offset_y": offset_y,
     }
+
+
+# ── Slide-level Image Stacking ──────────────────────────────────────────────
+
+SLIDE_HEIGHT_EMU = 6858000  # Standard 7.5" slide height
+SLIDE_TOP_MARGIN = 150000   # Top margin padding
+SLIDE_BOTTOM_MARGIN = 150000  # Bottom margin padding
+
+
+def compute_slide_image_stack(image_entries, static_shapes=None):
+    """Restack all images on a slide so nothing overlaps.
+
+    All sections (dynamic and static) are scaled by a uniform factor if the
+    total height exceeds available slide space. This keeps row sizes consistent
+    across all tables. Static image content isn't replaced, but their shape
+    dimensions are scaled so they don't hog space.
+
+    Args:
+        image_entries: list of dicts, each with:
+            - target_shape_id: str
+            - _computed: dict with cx, cy
+            - _original_geometry: dict with x, y, cx, cy
+            - _label_shape: optional dict with shape_id and geometry
+        static_shapes: list of dicts, each with:
+            - shape_id: str
+            - geometry: dict with x, y, cx, cy
+            - _label_shape: optional dict with shape_id and geometry
+
+    Returns:
+        list of dicts with: shape_id, cx, cy, new_x, new_y, scale_factor,
+        and optionally label_shape_id, label_new_y for repositioned labels.
+    """
+    if not image_entries:
+        return []
+
+    gap = 50000  # ~0.05" gap between sections
+    label_height = 310000  # ~0.25" for section label
+
+    # Build a unified list of sections sorted by original Y position
+    sections = []
+
+    for e in image_entries:
+        y = e["_original_geometry"].get("y", 0)
+        if e.get("_label_shape"):
+            y = min(y, e["_label_shape"].get("geometry", {}).get("y", y))
+        sections.append({
+            "type": "dynamic",
+            "sort_y": y,
+            "entry": e,
+        })
+
+    for s in (static_shapes or []):
+        y = s["geometry"].get("y", 0)
+        if s.get("_label_shape"):
+            y = min(y, s["_label_shape"].get("geometry", {}).get("y", y))
+        sections.append({
+            "type": "static",
+            "sort_y": y,
+            "entry": s,
+        })
+
+    sections.sort(key=lambda s: s["sort_y"])
+
+    n_sections = len(sections)
+
+    # Determine the top starting Y from the first section
+    first_y = sections[0]["sort_y"]
+    available_height = SLIDE_HEIGHT_EMU - first_y - SLIDE_BOTTOM_MARGIN
+
+    # Compute fixed overhead: labels + gaps + static image heights
+    total_gaps = gap * max(n_sections - 1, 0)
+    total_labels = sum(
+        label_height for sec in sections if sec["entry"].get("_label_shape")
+    )
+    total_static = sum(
+        sec["entry"]["geometry"].get("cy", 0)
+        for sec in sections if sec["type"] == "static"
+    )
+
+    # Remaining space is distributed equally among dynamic images
+    n_dynamic = sum(1 for sec in sections if sec["type"] == "dynamic")
+    available_for_dynamic = available_height - total_gaps - total_labels - total_static
+
+    if n_dynamic > 0 and available_for_dynamic > 0:
+        equal_dynamic_height = available_for_dynamic // n_dynamic
+    else:
+        equal_dynamic_height = 0
+
+    # Assign equal height to each dynamic image
+    for sec in sections:
+        if sec["type"] == "dynamic":
+            sec["entry"]["_computed"]["cy"] = equal_dynamic_height
+
+    scale_factor = 1.0
+
+    # Lay out sections top-to-bottom
+    results = []
+    current_y = first_y
+
+    for sec in sections:
+        if sec["type"] == "static":
+            s = sec["entry"]
+            geo = s["geometry"]
+            scaled_cy = int(geo.get("cy", 0) * scale_factor)
+
+            result = {
+                "shape_id": s["shape_id"],
+                "cx": geo.get("cx", 0),
+                "cy": scaled_cy,
+                "new_x": geo.get("x", 0),
+                "new_y": current_y,
+                "scale_factor": scale_factor,
+                "is_static": True,
+            }
+
+            if s.get("_label_shape"):
+                result["label_shape_id"] = s["_label_shape"]["shape_id"]
+                result["label_new_y"] = current_y
+                result["label_cy"] = int(label_height * scale_factor)
+                current_y += int(label_height * scale_factor)
+
+            result["new_y"] = current_y
+            current_y += scaled_cy + int(gap * scale_factor)
+
+            results.append(result)
+
+        else:
+            e = sec["entry"]
+            shape_id = e["target_shape_id"]
+            orig_geo = e["_original_geometry"]
+            computed = e["_computed"]
+
+            scaled_cy = int(computed["cy"] * scale_factor)
+
+            result = {
+                "shape_id": shape_id,
+                "cx": computed["cx"],
+                "cy": scaled_cy,
+                "new_x": orig_geo.get("x", 0),
+                "new_y": current_y,
+                "scale_factor": scale_factor,
+            }
+
+            if e.get("_label_shape"):
+                result["label_shape_id"] = e["_label_shape"]["shape_id"]
+                result["label_new_y"] = current_y
+                result["label_cy"] = int(label_height * scale_factor)
+                current_y += int(label_height * scale_factor)
+
+            result["new_y"] = current_y
+            current_y += scaled_cy + int(gap * scale_factor)
+
+            results.append(result)
+
+    return results
 
 
 # ── Text Layout ──────────────────────────────────────────────────────────────

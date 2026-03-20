@@ -16,7 +16,8 @@ Deconstruct the PowerPoint file into the component library.
 1. Run deconstruct with logging enabled:
 
 ```python
-import logging
+import sys, logging
+sys.path.insert(0, "src")
 logging.basicConfig(level=logging.INFO)
 from deconstruct import deconstruct
 deconstruct("$ARGUMENTS", "component_library", force=True)

@@ -13,7 +13,8 @@ Apply all resolved values into the raw slide XML files.
 1. Run inject with logging:
 
 ```python
-import logging
+import sys, logging
+sys.path.insert(0, "src")
 logging.basicConfig(level=logging.INFO)
 from inject import inject
 inject("configs/slides_examples.json", "component_library", dry_run=False)

@@ -13,7 +13,8 @@ Generate the configuration file from the component library.
 1. Run generate_config with logging:
 
 ```python
-import logging
+import sys, logging
+sys.path.insert(0, "src")
 logging.basicConfig(level=logging.INFO)
 from generate_config import generate_config
 generate_config("component_library", "configs", force=True)
