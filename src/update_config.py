@@ -54,7 +54,11 @@ def _load_xlsx(xlsx_path: str) -> list:
                 for rel in rels_root:
                     target = rel.get("Target", "")
                     if "worksheets/sheet1" in target or "worksheets/sheet" in target:
-                        sheet_path = "xl/" + target.lstrip("/")
+                        clean = target.lstrip("/")
+                        if clean.startswith("xl/"):
+                            sheet_path = clean
+                        else:
+                            sheet_path = "xl/" + clean
                         break
 
         if not sheet_path:
@@ -573,6 +577,38 @@ def update_config(config_path: str, data_dir: str):
         ]
         if not dynamic_images:
             continue  # no dynamic images to stack
+
+        # Single dynamic image: just resize in place, no stacking needed
+        if len(dynamic_images) == 1:
+            image = dynamic_images[0]
+            target_shape_id = image.get("target_shape_id")
+            if target_shape_id:
+                # Find the shape and save original cy before updating
+                orig_y = None
+                orig_cy = None
+                for shape in slide["shapes"]:
+                    if shape.get("shape_id") == target_shape_id and shape.get("geometry"):
+                        orig_y = shape["geometry"].get("y", 0)
+                        orig_cy = shape["geometry"].get("cy", 0)
+                        shape["geometry"]["cy"] = image["_computed"]["cy"]
+                        break
+                # Resize overlay shapes that match this image's original position
+                if orig_y is not None and orig_cy is not None:
+                    new_cy = image["_computed"]["cy"]
+                    for shape in slide["shapes"]:
+                        if shape.get("shape_id") == target_shape_id:
+                            continue
+                        geo = shape.get("geometry")
+                        if not geo:
+                            continue
+                        if (abs(geo.get("y", 0) - orig_y) < 10000 and
+                                abs(geo.get("cy", 0) - orig_cy) < 10000):
+                            geo["cy"] = new_cy
+                            logger.info("  ok %s -> overlay %s: resized to cy=%d",
+                                        slide_key, shape["shape_id"], new_cy)
+                logger.info("  ok %s -> image %s: resized in place to cy=%d",
+                            slide_key, target_shape_id, image["_computed"]["cy"])
+            continue
 
         # Helper: find label shape above an image at a given Y position
         def _find_label(img_y, used_label_ids):

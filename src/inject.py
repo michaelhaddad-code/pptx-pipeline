@@ -153,28 +153,200 @@ def _escape_for_xml(text: str) -> str:
 
 def _replace_shape_text(shape_xml: str, new_value: str) -> tuple[str, bool]:
     """
-    Replace the entire text content of a shape with new_value.
-    Puts new_value in the first <a:t>, empties the rest.
+    Replace the text content of a shape with new_value, preserving run formatting.
+
+    Strategy: use the original run texts as a structural template. For each
+    original run, find the corresponding portion in the new text by matching
+    the run's label/prefix pattern. This keeps each <a:rPr> (bold, italic,
+    color, etc.) paired with the correct text segment.
+
+    Falls back to simple single-run replacement only if new text has no
+    structural overlap with the original runs.
+
     Returns (modified_shape_xml, was_modified).
     """
     at_pattern = re.compile(
         r'(<[^>]*?:t\b[^>]*?>)(.*?)(</[^>]*?:t\s*>)',
         re.DOTALL
     )
-    escaped_value = _escape_for_xml(new_value)
     at_matches = list(at_pattern.finditer(shape_xml))
     if not at_matches:
         return shape_xml, False
 
+    n_runs = len(at_matches)
+
+    # Extract original run texts (XML-unescaped for matching)
+    original_texts = []
+    for am in at_matches:
+        raw = am.group(2)
+        raw = raw.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+        raw = raw.replace('&quot;', '"').replace('&apos;', "'")
+        original_texts.append(raw)
+
+    # Try structure-preserving replacement: match each original run's text
+    # as a label/prefix in the new value to determine split points.
+    # This works when the new text follows the same structure as the original
+    # (e.g., "ACR Growth: <new body>\nConsumption Plan in MSX: <new body>").
+    segments = _split_by_run_structure(original_texts, new_value)
+
+    if segments is None:
+        # Fallback: no structural match found. Put all text in first run,
+        # empty the rest (old behavior).
+        segments = [new_value] + [''] * (n_runs - 1)
+
     new_shape_xml = shape_xml
-    # Process in reverse to keep offsets valid
-    for j in range(len(at_matches) - 1, -1, -1):
+    for j in range(n_runs - 1, -1, -1):
         am = at_matches[j]
-        replacement = escaped_value if j == 0 else ""
-        new_at = am.group(1) + replacement + am.group(3)
+        escaped_segment = _escape_for_xml(segments[j])
+        new_at = am.group(1) + escaped_segment + am.group(3)
         new_shape_xml = new_shape_xml[:am.start()] + new_at + new_shape_xml[am.end():]
 
     return new_shape_xml, True
+
+
+def _split_by_run_structure(original_texts: list, new_value: str) -> list | None:
+    """
+    Split new_value into segments that map 1-to-1 onto original_texts runs.
+
+    For each original run, looks for its label (the text up to and including
+    the first colon or the full text if short) as a prefix marker in new_value.
+    Text between markers is assigned to the preceding run.
+
+    Returns list of segments (same length as original_texts), or None if
+    the structure can't be matched.
+    """
+    n = len(original_texts)
+    if n <= 1:
+        return [new_value]
+
+    # Identify "label" runs — short runs ending with colon+space, typically bold headers.
+    # These are the structural anchors we match against in the new text.
+    # Build pairs: (label_text, position_in_new_value)
+    remaining = new_value
+    segments = []
+    matched = 0
+
+    for i in range(n):
+        orig = original_texts[i].strip()
+        if not orig:
+            segments.append('')
+            continue
+
+        # Try to find this run's text (or its label prefix) in the remaining text
+        # For label runs (ending with ": " or ":"), match the label exactly
+        # For body runs, take everything up to the next label
+        label = orig
+        # Check if this is a label run — has a colon with a short prefix before it.
+        # e.g., "ACR Growth: ...", "CTA: ...", "Unified: ..." are all labels
+        # regardless of how long the full run text is.
+        colon_pos = orig.find(':')
+        is_label = colon_pos != -1 and colon_pos < 40
+
+        if is_label:
+            # Find this label in the remaining new text
+            pos = remaining.find(label)
+            if pos == -1:
+                # Try just the part before colon
+                label_prefix = orig.split(':')[0] + ':'
+                pos = remaining.find(label_prefix)
+                if pos == -1:
+                    # Can't find this label — structure doesn't match
+                    if matched == 0:
+                        return None
+                    # Append rest to previous segment
+                    segments[-1] += remaining
+                    remaining = ''
+                    segments.extend([''] * (n - len(segments)))
+                    return segments
+                # Found prefix — take up to end of prefix + trailing space
+                end = pos + len(label_prefix)
+                if end < len(remaining) and remaining[end] == ' ':
+                    end += 1
+                # Any text before this label belongs to previous run
+                if pos > 0 and segments:
+                    segments[-1] += remaining[:pos].rstrip('\n')
+                segments.append(remaining[pos:end])
+                remaining = remaining[end:]
+                matched += 1
+            else:
+                # Found exact label
+                end = pos + len(label)
+                if end < len(remaining) and remaining[end] == ' ':
+                    end += 1
+                if pos > 0 and segments:
+                    segments[-1] += remaining[:pos].rstrip('\n')
+                segments.append(remaining[pos:end])
+                remaining = remaining[end:]
+                matched += 1
+        else:
+            # Body run — find where this run's content ends in the new text.
+
+            # Short word-token runs (e.g., "above", "below") — match just the
+            # word itself, preserving it as an isolated formatted token.
+            if len(orig) <= 20 and ' ' not in orig.strip():
+                word = orig.strip()
+                wp = remaining.find(word)
+                if wp != -1:
+                    end = wp + len(word)
+                    # Include trailing space if present (to match original spacing)
+                    if end < len(remaining) and remaining[end] == ' ':
+                        end += 1
+                    segments.append(remaining[wp:end])
+                    # Any text before the word belongs to previous segment
+                    if wp > 0 and segments and len(segments) >= 2:
+                        segments[-2] += remaining[:wp]
+                    remaining = remaining[end:]
+                    matched += 1
+                    continue
+
+            # Check if the next run's original text appears literally
+            # in the remaining text (e.g., italic parenthetical). If so, use
+            # that as the split point instead of the next label.
+            next_split = len(remaining)
+
+            if i + 1 < n:
+                next_orig = original_texts[i + 1].strip()
+                if next_orig:
+                    fp = remaining.find(next_orig)
+                    if fp != -1:
+                        next_split = fp
+                        segments.append(remaining[:next_split].rstrip('\n'))
+                        remaining = remaining[next_split:]
+                        matched += 1
+                        continue
+
+            # Fall back: find the next label in the remaining text
+            for future_i in range(i + 1, n):
+                future_orig = original_texts[future_i].strip()
+                future_colon = future_orig.find(':')
+                if future_colon != -1 and future_colon < 40:
+                    future_label = future_orig.split(':')[0] + ':'
+                    fp = remaining.find(future_label)
+                    if fp != -1:
+                        # Check for preceding newline
+                        nl = remaining.rfind('\n', 0, fp)
+                        next_split = nl if nl != -1 else fp
+                        break
+
+            segment_text = remaining[:next_split]
+            segment_text = segment_text.strip('\n')
+            segments.append(segment_text)
+            remaining = remaining[next_split:].lstrip('\n')
+            matched += 1
+
+    # Append any leftover text to the last segment
+    if remaining.strip() and segments:
+        segments[-1] += remaining.rstrip('\n')
+        remaining = ''
+
+    # Pad or trim to match run count
+    while len(segments) < n:
+        segments.append('')
+    if len(segments) > n:
+        # Merge overflow into last segment
+        segments = segments[:n - 1] + ['\n'.join(segments[n - 1:])]
+
+    return segments if matched >= 2 else None
 
 
 # ── Legacy token replacement (string-based) ───────────────────────────────
@@ -340,7 +512,7 @@ def _apply_text_autofit(shape_xml: str, target_sz: int) -> str:
     Returns modified shape_xml.
     """
     rpr_pattern = re.compile(
-        r'(<[^>]*?:rPr\b)([^>]*?)(/?>)',
+        r'(<(?!/)[^>]*?:rPr\b)([^>]*?)(/?>)',
         re.DOTALL
     )
     sz_attr_pattern = re.compile(r'\bsz\s*=\s*"(\d+)"')
@@ -777,7 +949,7 @@ def _inject_table_geometry(shape_xml: str, computed: dict) -> str:
     tr_open_pat = re.compile(r'<([a-zA-Z0-9_]+:)?tr\b[^>]*?>')
     tr_spans = _find_element_spans_in(shape_xml, tr_open_pat)
 
-    rpr_pattern = re.compile(r'(<[^>]*?:rPr\b)([^>]*?)(/?>)', re.DOTALL)
+    rpr_pattern = re.compile(r'(<(?!/)[^>]*?:rPr\b)([^>]*?)(/?>)', re.DOTALL)
     sz_attr_pattern = re.compile(r'\bsz\s*=\s*"(\d+)"')
 
     for row_i, (rs, re_) in enumerate(tr_spans):

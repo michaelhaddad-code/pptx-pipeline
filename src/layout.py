@@ -290,21 +290,44 @@ def compute_slide_image_stack(image_entries, static_shapes=None):
         for sec in sections if sec["type"] == "static"
     )
 
-    # Remaining space is distributed equally among dynamic images
+    # Remaining space for dynamic images
     n_dynamic = sum(1 for sec in sections if sec["type"] == "dynamic")
     available_for_dynamic = available_height - total_gaps - total_labels - total_static
 
-    if n_dynamic > 0 and available_for_dynamic > 0:
-        equal_dynamic_height = available_for_dynamic // n_dynamic
-    else:
-        equal_dynamic_height = 0
+    if n_dynamic >= 2 and available_for_dynamic > 0:
+        # Multiple dynamic images: distribute space proportionally based on
+        # each image's natural (fit_width) height so aspect ratios are preserved.
+        proportional_heights = []
+        for sec in sections:
+            if sec["type"] == "dynamic":
+                proportional_heights.append(sec["entry"]["_computed"]["cy"])
+        total_proportional = sum(proportional_heights) or 1
+        for sec in sections:
+            if sec["type"] == "dynamic":
+                ratio = sec["entry"]["_computed"]["cy"] / total_proportional
+                sec["entry"]["_computed"]["cy"] = int(available_for_dynamic * ratio)
+    elif n_dynamic == 1 and available_for_dynamic > 0:
+        # Single dynamic image: use its proportional height, capped to available space
+        for sec in sections:
+            if sec["type"] == "dynamic":
+                proportional_cy = sec["entry"]["_computed"]["cy"]
+                sec["entry"]["_computed"]["cy"] = min(proportional_cy, available_for_dynamic)
 
-    # Assign equal height to each dynamic image
+    # Compute total content height for overflow check
+    total_content_height = 0
     for sec in sections:
-        if sec["type"] == "dynamic":
-            sec["entry"]["_computed"]["cy"] = equal_dynamic_height
+        if sec["type"] == "static":
+            total_content_height += sec["entry"]["geometry"].get("cy", 0)
+        else:
+            total_content_height += sec["entry"]["_computed"]["cy"]
+        if sec["entry"].get("_label_shape"):
+            total_content_height += label_height
 
-    scale_factor = 1.0
+    total_needed = total_content_height + total_gaps
+    if total_needed > available_height and total_needed > 0:
+        scale_factor = available_height / total_needed
+    else:
+        scale_factor = 1.0
 
     # Lay out sections top-to-bottom
     results = []
