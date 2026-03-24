@@ -12,6 +12,7 @@ import os
 import json
 import sys
 import logging
+import statistics
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +45,22 @@ def _make_layout_stub(category: str, shape: dict) -> dict:
     """
     if category == "text":
         # Derive font bounds from the template's actual font sizes
-        template_fonts = shape.get("font_sizes", [])
-        if template_fonts:
-            max_font = max(template_fonts)
-            # min is 25% of the template font (floor at 400 = 4pt for readability)
-            min_font = max(400, max_font // 4)
+        font_sizes = shape.get("font_sizes", [])
+        if font_sizes:
+            # Fix 23: use actual font data from shape runs
+            max_font = max(font_sizes)
+            min_font = max(400, min(font_sizes) // 2)
+
+            # Fix 41: per-run font metadata for multi-size shapes
+            header_font = max(font_sizes)
+            body_font = statistics.median(font_sizes)
+            # Use body_font as max_font for auto-fit so decorative headers
+            # don't inflate the baseline and over-shrink body text
+            max_font = int(body_font)
         else:
             # Fallback: read from geometry — estimate reasonable font from shape height
+            header_font = None
+            body_font = None
             geo = shape.get("geometry", {})
             cy = geo.get("cy", 0)
             if cy > 0:
@@ -61,11 +71,16 @@ def _make_layout_stub(category: str, shape: dict) -> dict:
             else:
                 max_font = 2400
                 min_font = 600
-        return {
+
+        stub = {
             "type": "auto_fit_text",
             "min_font_size": min_font,
             "max_font_size": max_font,
         }
+        if header_font is not None:
+            stub["header_font"] = header_font
+            stub["body_font"] = int(body_font)
+        return stub
 
     elif category == "table":
         table_grid = shape.get("table_grid", {})
@@ -161,8 +176,17 @@ def generate_config(
         logger.info("  Use --force to overwrite.")
         return config_path
 
+    # Fix 49: when --force, load existing config to preserve mapping work
+    existing_shapes_by_id = {}
     if os.path.exists(config_path) and force:
         logger.info("Config exists for '%s' -- overwriting (--force).", deck_name)
+        with open(config_path) as f:
+            existing_config = json.load(f)
+        for slide_data in existing_config.get("slides", {}).values():
+            for s in slide_data.get("shapes", []):
+                sid = s.get("shape_id")
+                if sid:
+                    existing_shapes_by_id[sid] = s
 
     logger.info("Generating config for: %s", deck_name)
 
@@ -214,6 +238,13 @@ def generate_config(
             # Track parent group for nested shapes
             if shape.get("parent_group"):
                 shape_entry["parent_group"] = shape["parent_group"]
+
+            # Fix 49: preserve mapping data from previous config if shape still exists
+            prev = existing_shapes_by_id.get(shape_entry["shape_id"])
+            if prev:
+                for key in ("is_dynamic", "data_field", "resolved_tokens", "resolved_value"):
+                    if key in prev:
+                        shape_entry[key] = prev[key]
 
             shapes_config.append(shape_entry)
 

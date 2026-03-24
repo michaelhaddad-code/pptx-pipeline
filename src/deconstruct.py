@@ -18,7 +18,20 @@ from xml.etree import ElementTree as ET
 logger = logging.getLogger(__name__)
 
 
-def deconstruct(pptx_path: str, library_path: str = "component_library", force: bool = False):
+def _dir_size(path: str) -> int:
+    """Compute total size of a directory in bytes."""
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(path):
+        for fname in filenames:
+            fp = os.path.join(dirpath, fname)
+            try:
+                total += os.path.getsize(fp)
+            except OSError:
+                pass
+    return total
+
+
+def deconstruct(pptx_path: str, library_path: str = "component_library", force: bool = False, no_backup: bool = False):
     logger.info("Deconstructing: %s", pptx_path)
     logger.info("Output library: %s", library_path)
 
@@ -29,11 +42,20 @@ def deconstruct(pptx_path: str, library_path: str = "component_library", force: 
             if response != "y":
                 print("Aborted.")
                 return
-        # Create timestamped backup before deletion
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = f"{library_path}_backup_{timestamp}"
-        shutil.copytree(library_path, backup_path)
-        logger.info("  Backup created: %s", backup_path)
+        if no_backup:
+            logger.info("  Skipping backup (--no-backup)")
+        else:
+            # Create timestamped backup before deletion
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = f"{library_path}_backup_{timestamp}"
+            shutil.copytree(library_path, backup_path)
+            # Fix 44: log backup size
+            backup_size = _dir_size(backup_path)
+            if backup_size >= 1024 * 1024:
+                size_str = f"{backup_size / (1024 * 1024):.1f} MB"
+            else:
+                size_str = f"{backup_size / 1024:.1f} KB"
+            logger.info("  Backup created: %s (%s)", backup_path, size_str)
         shutil.rmtree(library_path)
     os.makedirs(library_path)
 
@@ -172,7 +194,20 @@ def deconstruct(pptx_path: str, library_path: str = "component_library", force: 
                     "row_fonts": row_fonts,
                 }
 
-            def _extract_shape(elem, parent_group=None):
+            def _extract_group_offsets(elem):
+                """Extract a group shape's own offset and child origin offset."""
+                grp_xfrm = elem.find("p:grpSpPr/a:xfrm", ns)
+                if grp_xfrm is None:
+                    return (0, 0, 0, 0)
+                off = grp_xfrm.find("a:off", ns)
+                ch_off = grp_xfrm.find("a:chOff", ns)
+                grp_x = int(off.get("x", 0)) if off is not None else 0
+                grp_y = int(off.get("y", 0)) if off is not None else 0
+                ch_off_x = int(ch_off.get("x", 0)) if ch_off is not None else 0
+                ch_off_y = int(ch_off.get("y", 0)) if ch_off is not None else 0
+                return (grp_x, grp_y, ch_off_x, ch_off_y)
+
+            def _extract_shape(elem, parent_group=None, group_offset=None):
                 """Extract shape info from an element, recursing into groups."""
                 tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
                 shape_info = {"type": tag}
@@ -189,6 +224,16 @@ def deconstruct(pptx_path: str, library_path: str = "component_library", force: 
                 geo = _extract_geometry(elem)
                 if geo:
                     shape_info["geometry"] = geo
+
+                    # Fix 40/43: convert group-relative coords to slide-absolute
+                    if group_offset is not None:
+                        grp_x, grp_y, ch_off_x, ch_off_y = group_offset
+                        shape_info["geometry_absolute"] = {
+                            "x": geo["x"] + grp_x - ch_off_x,
+                            "y": geo["y"] + grp_y - ch_off_y,
+                            "cx": geo["cx"],
+                            "cy": geo["cy"],
+                        }
 
                 # Table grid info
                 if tag == "graphicFrame":
@@ -218,6 +263,25 @@ def deconstruct(pptx_path: str, library_path: str = "component_library", force: 
                 if font_sizes_found:
                     shape_info["font_sizes"] = sorted(font_sizes_found)
 
+                # Fix 41 (metadata): store richer per-run font metadata
+                run_fonts = []
+                for run_elem in elem.findall(".//a:r", ns):
+                    rpr = run_elem.find("a:rPr", ns)
+                    run_meta = {"bold": False, "sz": 0, "color": ""}
+                    if rpr is not None:
+                        b_attr = rpr.get("b", "")
+                        run_meta["bold"] = b_attr in ("1", "true")
+                        sz_attr = rpr.get("sz")
+                        if sz_attr:
+                            run_meta["sz"] = int(sz_attr)
+                        # Extract color from solidFill/srgbClr
+                        srgb = rpr.find("a:solidFill/a:srgbClr", ns)
+                        if srgb is not None:
+                            run_meta["color"] = srgb.get("val", "")
+                    run_fonts.append(run_meta)
+                if run_fonts:
+                    shape_info["run_fonts"] = run_fonts
+
                 # Extract text content if any
                 texts = []
                 for t in elem.findall(".//a:t", ns):
@@ -234,10 +298,22 @@ def deconstruct(pptx_path: str, library_path: str = "component_library", force: 
                 # Recurse into group shapes to enumerate children
                 if tag == "grpSp":
                     group_id = shape_info.get("id", "unknown")
+                    grp_offsets = _extract_group_offsets(elem)
+                    # If this group is itself inside a parent group, compose offsets
+                    if group_offset is not None:
+                        p_grp_x, p_grp_y, p_ch_off_x, p_ch_off_y = group_offset
+                        composed = (
+                            grp_offsets[0] + p_grp_x - p_ch_off_x,
+                            grp_offsets[1] + p_grp_y - p_ch_off_y,
+                            grp_offsets[2],
+                            grp_offsets[3],
+                        )
+                    else:
+                        composed = grp_offsets
                     for child in elem:
                         child_tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
                         if child_tag in ("sp", "pic", "grpSp", "graphicFrame", "cxnSp"):
-                            _extract_shape(child, parent_group=group_id)
+                            _extract_shape(child, parent_group=group_id, group_offset=composed)
 
             sp_tree = root.find(".//p:spTree", ns)
             if sp_tree is not None:
@@ -290,5 +366,6 @@ if __name__ == "__main__":
     parser.add_argument("pptx", nargs="?", default="Slides_Examples.pptx", help="Path to the input .pptx file")
     parser.add_argument("--library", default="component_library", help="Output library directory (default: component_library)")
     parser.add_argument("--force", action="store_true", help="Overwrite existing library without prompting")
+    parser.add_argument("--no-backup", action="store_true", help="Skip backup creation when overwriting existing library")
     args = parser.parse_args()
-    deconstruct(args.pptx, args.library, args.force)
+    deconstruct(args.pptx, args.library, args.force, no_backup=args.no_backup)

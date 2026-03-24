@@ -13,6 +13,9 @@ All dimensions are in EMU (English Metric Units):
 
 import struct
 import math
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 # ── Unit Constants (physical, not template-specific) ────────────────────────
@@ -152,8 +155,95 @@ def _read_jpeg_dimensions(file_path):
     return None
 
 
+def read_image_dpi(file_path):
+    """Read DPI metadata from a PNG or JPEG file.
+
+    Args:
+        file_path: str, path to image file
+
+    Returns:
+        (dpi_x, dpi_y) tuple of floats, defaults to (96, 96) if metadata absent
+    """
+    default_dpi = (96, 96)
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(8)
+
+            # PNG: scan for pHYs chunk
+            if header == b"\x89PNG\r\n\x1a\n":
+                # Skip past the signature, read chunks
+                while True:
+                    chunk_header = f.read(8)
+                    if len(chunk_header) < 8:
+                        break
+                    chunk_length = struct.unpack(">I", chunk_header[:4])[0]
+                    chunk_type = chunk_header[4:8]
+                    if chunk_type == b"pHYs":
+                        phys_data = f.read(chunk_length)
+                        if len(phys_data) >= 9:
+                            dpm_x = struct.unpack(">I", phys_data[0:4])[0]
+                            dpm_y = struct.unpack(">I", phys_data[4:8])[0]
+                            unit = phys_data[8]
+                            if unit == 1 and dpm_x > 0 and dpm_y > 0:
+                                # Unit 1 = meter; convert dots-per-meter to DPI
+                                dpi_x = dpm_x * 0.0254
+                                dpi_y = dpm_y * 0.0254
+                                return (dpi_x, dpi_y)
+                        break
+                    else:
+                        # Skip chunk data + 4-byte CRC
+                        f.read(chunk_length + 4)
+                logger.warning("No pHYs chunk in PNG %s, defaulting to 96 DPI", file_path)
+                return default_dpi
+
+            # JPEG: look for APP0 (JFIF) marker for density
+            if header[:2] == b"\xff\xd8":
+                f.seek(2)
+                while True:
+                    marker = f.read(2)
+                    if len(marker) < 2:
+                        break
+                    if marker[0] != 0xFF:
+                        break
+                    code = marker[1]
+                    if code == 0xE0:  # APP0 / JFIF
+                        length_bytes = f.read(2)
+                        if len(length_bytes) < 2:
+                            break
+                        seg_length = struct.unpack(">H", length_bytes)[0]
+                        seg_data = f.read(seg_length - 2)
+                        # JFIF: identifier "JFIF\x00" at offset 0, density at offset 7
+                        if len(seg_data) >= 12 and seg_data[:5] == b"JFIF\x00":
+                            density_unit = seg_data[7]
+                            x_density = struct.unpack(">H", seg_data[8:10])[0]
+                            y_density = struct.unpack(">H", seg_data[10:12])[0]
+                            if density_unit == 1 and x_density > 0 and y_density > 0:
+                                # Unit 1 = dots per inch
+                                return (float(x_density), float(y_density))
+                            elif density_unit == 2 and x_density > 0 and y_density > 0:
+                                # Unit 2 = dots per cm -> convert to DPI
+                                return (x_density * 2.54, y_density * 2.54)
+                        break
+                    if code == 0xD9:  # EOI
+                        break
+                    if code == 0x00 or (0xD0 <= code <= 0xD7):
+                        continue
+                    length_bytes = f.read(2)
+                    if len(length_bytes) < 2:
+                        break
+                    seg_length = struct.unpack(">H", length_bytes)[0]
+                    f.read(seg_length - 2)
+                logger.warning("No JFIF DPI metadata in JPEG %s, defaulting to 96 DPI", file_path)
+                return default_dpi
+
+    except (OSError, struct.error) as exc:
+        logger.warning("Could not read DPI from %s (%s), defaulting to 96 DPI", file_path, exc)
+
+    return default_dpi
+
+
 def compute_image_fit(img_width_px, img_height_px, max_cx, max_cy,
-                      fit="contain", anchor="center"):
+                      fit="contain", anchor="center", dpi=96):
     """Compute fitted image dimensions and offset within a bounding box.
 
     Args:
@@ -169,8 +259,9 @@ def compute_image_fit(img_width_px, img_height_px, max_cx, max_cy,
     if img_width_px <= 0 or img_height_px <= 0:
         return {"cx": max_cx, "cy": max_cy, "offset_x": 0, "offset_y": 0}
 
-    img_w_emu = img_width_px * EMU_PER_PX_96DPI
-    img_h_emu = img_height_px * EMU_PER_PX_96DPI
+    emu_per_px = EMU_PER_INCH / dpi
+    img_w_emu = img_width_px * emu_per_px
+    img_h_emu = img_height_px * emu_per_px
 
     if fit == "stretch":
         return {"cx": max_cx, "cy": max_cy, "offset_x": 0, "offset_y": 0}
@@ -272,6 +363,94 @@ def compute_slide_image_stack(image_entries, static_shapes=None):
             "entry": s,
         })
 
+    # Compute X range for each section to detect columns
+    for sec in sections:
+        if sec["type"] == "dynamic":
+            geo = sec["entry"]["_original_geometry"]
+        else:
+            geo = sec["entry"]["geometry"]
+        sec["x_min"] = geo.get("x", 0)
+        sec["x_max"] = geo.get("x", 0) + geo.get("cx", 0)
+
+    # Group sections whose X ranges overlap into columns
+    column_groups = _group_sections_by_x_overlap(sections)
+
+    # Run stacking independently per column group
+    results = []
+    for group in column_groups:
+        results.extend(_stack_column_sections(group, gap, label_height))
+
+    return results
+
+
+def _group_sections_by_x_overlap(sections):
+    """Group sections whose X ranges overlap into column groups.
+
+    Args:
+        sections: list of section dicts, each with x_min, x_max keys
+
+    Returns:
+        list of lists — each inner list is a group of sections sharing
+        overlapping X ranges (i.e. same column)
+    """
+    if not sections:
+        return []
+
+    groups = []
+    for sec in sections:
+        merged = False
+        for group in groups:
+            # Check if this section overlaps with any section already in the group
+            for member in group:
+                if sec["x_min"] < member["x_max"] and sec["x_max"] > member["x_min"]:
+                    group.append(sec)
+                    merged = True
+                    break
+            if merged:
+                break
+        if not merged:
+            groups.append([sec])
+
+    # Merge groups that transitively overlap (in case a wide section bridges two groups)
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(groups)):
+            for j in range(i + 1, len(groups)):
+                # Check if any section in group i overlaps any in group j
+                overlap = False
+                for si in groups[i]:
+                    for sj in groups[j]:
+                        if si["x_min"] < sj["x_max"] and si["x_max"] > sj["x_min"]:
+                            overlap = True
+                            break
+                    if overlap:
+                        break
+                if overlap:
+                    groups[i].extend(groups[j])
+                    groups.pop(j)
+                    changed = True
+                    break
+            if changed:
+                break
+
+    return groups
+
+
+def _stack_column_sections(sections, gap, label_height):
+    """Run the vertical stacking algorithm on a single column of sections.
+
+    Args:
+        sections: list of section dicts (type, sort_y, entry)
+        gap: int, vertical gap in EMU between sections
+        label_height: int, height in EMU reserved for a label
+
+    Returns:
+        list of result dicts with shape_id, cx, cy, new_x, new_y, etc.
+    """
+    if not sections:
+        return []
+
     sections.sort(key=lambda s: s["sort_y"])
 
     n_sections = len(sections)
@@ -294,24 +473,41 @@ def compute_slide_image_stack(image_entries, static_shapes=None):
     n_dynamic = sum(1 for sec in sections if sec["type"] == "dynamic")
     available_for_dynamic = available_height - total_gaps - total_labels - total_static
 
+    # Save original fit_width aspect ratios before any height redistribution
+    for sec in sections:
+        if sec["type"] == "dynamic":
+            c = sec["entry"]["_computed"]
+            c["_original_fit_cx"] = c["cx"]
+            c["_original_fit_cy"] = c["cy"]
+
     if n_dynamic >= 2 and available_for_dynamic > 0:
         # Multiple dynamic images: distribute space proportionally based on
         # each image's natural (fit_width) height so aspect ratios are preserved.
         proportional_heights = []
         for sec in sections:
             if sec["type"] == "dynamic":
-                proportional_heights.append(sec["entry"]["_computed"]["cy"])
+                proportional_heights.append(sec["entry"]["_computed"]["_original_fit_cy"])
         total_proportional = sum(proportional_heights) or 1
         for sec in sections:
             if sec["type"] == "dynamic":
-                ratio = sec["entry"]["_computed"]["cy"] / total_proportional
-                sec["entry"]["_computed"]["cy"] = int(available_for_dynamic * ratio)
+                c = sec["entry"]["_computed"]
+                ratio = c["_original_fit_cy"] / total_proportional
+                c["cy"] = int(available_for_dynamic * ratio)
+                # Scale cx proportionally to preserve aspect ratio,
+                # but never exceed original container width
+                if c["_original_fit_cy"] > 0:
+                    ar_scale = c["cy"] / c["_original_fit_cy"]
+                    c["cx"] = min(c["_original_fit_cx"], int(c["_original_fit_cx"] * ar_scale))
     elif n_dynamic == 1 and available_for_dynamic > 0:
         # Single dynamic image: use its proportional height, capped to available space
         for sec in sections:
             if sec["type"] == "dynamic":
-                proportional_cy = sec["entry"]["_computed"]["cy"]
-                sec["entry"]["_computed"]["cy"] = min(proportional_cy, available_for_dynamic)
+                c = sec["entry"]["_computed"]
+                new_cy = min(c["_original_fit_cy"], available_for_dynamic)
+                if c["_original_fit_cy"] > 0:
+                    ar_scale = new_cy / c["_original_fit_cy"]
+                    c["cx"] = min(c["_original_fit_cx"], int(c["_original_fit_cx"] * ar_scale))
+                c["cy"] = new_cy
 
     # Compute total content height for overflow check
     total_content_height = 0
@@ -367,12 +563,20 @@ def compute_slide_image_stack(image_entries, static_shapes=None):
             computed = e["_computed"]
 
             scaled_cy = int(computed["cy"] * scale_factor)
+            scaled_cx = int(computed["cx"] * scale_factor)
+
+            # Center horizontally if image is narrower than original shape
+            orig_cx = orig_geo.get("cx", 0)
+            if scaled_cx < orig_cx:
+                new_x = orig_geo.get("x", 0) + (orig_cx - scaled_cx) // 2
+            else:
+                new_x = orig_geo.get("x", 0)
 
             result = {
                 "shape_id": shape_id,
-                "cx": computed["cx"],
+                "cx": scaled_cx,
                 "cy": scaled_cy,
-                "new_x": orig_geo.get("x", 0),
+                "new_x": new_x,
                 "new_y": current_y,
                 "scale_factor": scale_factor,
             }
@@ -412,28 +616,50 @@ def compute_text_font_scale(text, shape_cx, shape_cy,
     if not text or shape_cx <= 0 or shape_cy <= 0 or original_font_size <= 0:
         return original_font_size
 
+    # Account for PowerPoint's default text box insets (~0.1" = 91440 EMU each side)
+    _TEXT_INSET = 91440
+    usable_cx = max(shape_cx - 2 * _TEXT_INSET, shape_cx // 2)
+
+    # Short-text fast-path: if entire text fits on one line at max_font, use it directly
+    if len(text) * max_font * EMU_PER_PT / 100 * 0.55 < usable_cx:
+        return max_font
+
     font_size = min(original_font_size, max_font)
 
     # Convert font size to EMU (hundredths of point -> EMU)
     font_emu = font_size * EMU_PER_PT / 100
 
-    # Estimate characters per line (~60% of em width per char)
-    char_width_emu = font_emu * 0.6
+    # Estimate characters per line (~55% of em width per char, conservative
+    # to account for bold runs and proportional font variation)
+    char_width_emu = font_emu * 0.55
     if char_width_emu <= 0:
         return font_size
 
-    chars_per_line = shape_cx / char_width_emu
+    chars_per_line = usable_cx / char_width_emu
     if chars_per_line <= 0:
         return font_size
 
-    # Estimate lines needed
-    lines_needed = math.ceil(len(text) / chars_per_line)
+    # Estimate lines needed — split by explicit newlines first,
+    # then wrap each paragraph to the available width
+    paragraphs = text.split('\n')
+    lines_needed = 0
+    for para in paragraphs:
+        para_len = len(para.strip()) if para.strip() else 1  # blank line = 1 line
+        lines_needed += max(1, math.ceil(para_len / chars_per_line))
+
     # Single line: font em is sufficient. Multi-line: 120% spacing between lines.
     if lines_needed <= 1:
         height_needed = font_emu
     else:
         height_needed = font_emu + (lines_needed - 1) * font_emu * 1.2
 
+    # Add safety margin to account for paragraph spacing (spcBef/spcAft),
+    # bold text width variation, and PowerPoint rendering differences.
+    # Multi-paragraph text gets 20%; single-paragraph gets 10%.
+    if '\n' in text:
+        height_needed *= 1.20
+    else:
+        height_needed *= 1.10
     if height_needed > shape_cy and height_needed > 0:
         scale = shape_cy / height_needed
         font_size = int(font_size * scale)

@@ -60,6 +60,10 @@ data/                    # User-provided data files for injection
 recipes/                 # Saved mapping recipes for reuse
 ```
 
+## Critical Rule: No Manual Edits
+
+**NEVER manually edit XML, config, media, or any pipeline files by hand.** All changes must go through pipeline scripts (`inject.py`, `replace_image.py`, `update_config.py`, etc.) or by writing/updating code first, then running it programmatically. If no existing script can accomplish the task, write or extend one — then execute it. This applies to every kind of modification: text, images, layout, config fields, slide XML — everything.
+
 ## Key Architecture Decisions
 
 - **String-based XML modification**: `src/inject.py` modifies raw XML strings, never calls `tree.write()`. This preserves exact formatting, namespaces, and declarations.

@@ -1673,10 +1673,11 @@ class TestApplyTextAutofit(unittest.TestCase):
         self.assertIn('b="1"', result)
         self.assertIn('lang="en-US"', result)
 
-    def test_adds_sz_when_missing(self):
+    def test_leaves_sz_when_missing(self):
+        """Runs without explicit sz are left untouched — they inherit from slide layout/master."""
         xml = '<p:sp><p:txBody><a:p><a:r><a:rPr lang="en-US"/><a:t>Text</a:t></a:r></a:p></p:txBody></p:sp>'
         result = _apply_text_autofit(xml, 900)
-        self.assertIn('sz="900"', result)
+        self.assertNotIn('sz=', result)
 
     def test_no_runs_returns_unchanged(self):
         xml = '<p:sp><p:txBody><a:p><a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp>'
@@ -1712,6 +1713,7 @@ class TestTextAutofitIntegration(unittest.TestCase):
             "shape_name": "Title 1",
             "category": "text",
             "is_dynamic": True,
+            "max_font_size": 2400,
             "resolved_value": "A very long replacement title text that should trigger autofit",
             "layout": {
                 "type": "auto_fit_text",
@@ -1787,11 +1789,11 @@ class TestInjectImageGeometry(unittest.TestCase):
 
     def test_updates_ext_dimensions(self):
         xml = self._make_slide_xml()
+        # cx is NEVER changed; only cy is updated (falls back to computed cy when no pixel dims)
         computed = {"cx": 3000000, "cy": 1500000, "offset_x": 0, "offset_y": 0}
         result = _inject_image_geometry(xml, "3", computed)
-        self.assertIn('cx="3000000"', result)
+        self.assertIn('cx="4206240"', result)  # cx unchanged from original
         self.assertIn('cy="1500000"', result)
-        self.assertNotIn('cx="4206240"', result)
 
     def test_updates_offset_with_geometry(self):
         xml = self._make_slide_xml()
