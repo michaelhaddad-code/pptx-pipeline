@@ -353,7 +353,104 @@ def resolve_token(token_ref: str, data: dict) -> dict:
     return {"value": token_ref, "_resolved": True}
 
 
-def update_config(config_path: str, data_dir: str):
+def apply_mappings(config: dict, mappings_path: str) -> int:
+    """Apply mappings from mappings.json into the config.
+
+    First resets all mapping fields (is_dynamic, data_field, source) so that
+    mappings.json is the sole source of truth. Then applies each mapping entry.
+
+    Args:
+        config: the loaded config dict (modified in place)
+        mappings_path: path to mappings.json
+
+    Returns:
+        number of mappings applied
+    """
+    if not os.path.exists(mappings_path):
+        logger.info("No mappings file found at %s, skipping.", mappings_path)
+        return 0
+
+    with open(mappings_path, encoding="utf-8") as f:
+        mappings_data = json.load(f)
+
+    mapping_list = mappings_data.get("mappings", [])
+    if not mapping_list:
+        logger.info("Mappings file is empty, skipping.")
+        return 0
+
+    # ── Reset all mapping fields so mappings.json is sole source of truth ──
+    for slide_key, slide in config["slides"].items():
+        for shape in slide["shapes"]:
+            shape["is_dynamic"] = False
+            shape.pop("data_field", None)
+            shape.pop("resolved_value", None)
+            shape.pop("resolved_tokens", None)
+        for image in slide.get("images", []):
+            image["is_dynamic"] = False
+            image.pop("source", None)
+            image.pop("resolved_source", None)
+
+    # ── Apply each mapping ──
+    applied = 0
+    for entry in mapping_list:
+        slide_key = entry.get("slide", "")
+        shape_id = str(entry.get("shape_id", ""))
+        mapping_type = entry.get("type", "")
+
+        slide = config["slides"].get(slide_key)
+        if slide is None:
+            logger.warning("  WARNING Mapping references unknown slide: %s", slide_key)
+            continue
+
+        # Find the shape
+        target_shape = None
+        for shape in slide["shapes"]:
+            if str(shape.get("shape_id", "")) == shape_id:
+                target_shape = shape
+                break
+
+        if target_shape is None:
+            logger.warning("  WARNING Mapping references unknown shape_id=%s on %s", shape_id, slide_key)
+            continue
+
+        # Mark shape as dynamic
+        target_shape["is_dynamic"] = True
+
+        if mapping_type in ("text", "table"):
+            target_shape["data_field"] = entry.get("data_field", "")
+            logger.info("  ok %s shape_id=%s -> data_field='%s' (%s)",
+                        slide_key, shape_id, target_shape["data_field"], mapping_type)
+
+        elif mapping_type == "image":
+            source = entry.get("source", "")
+            target_shape["data_field"] = source
+
+            # Also mark the corresponding images[] entry
+            rid = target_shape.get("image_rid", "")
+            if rid:
+                for image in slide.get("images", []):
+                    if image.get("rid") == rid:
+                        image["is_dynamic"] = True
+                        image["source"] = source
+                        break
+            else:
+                # Try matching by target_shape_id
+                for image in slide.get("images", []):
+                    if str(image.get("target_shape_id", "")) == shape_id:
+                        image["is_dynamic"] = True
+                        image["source"] = source
+                        break
+
+            logger.info("  ok %s shape_id=%s -> source='%s' (image)",
+                        slide_key, shape_id, source)
+
+        applied += 1
+
+    logger.info("Applied %d mappings from %s", applied, mappings_path)
+    return applied
+
+
+def update_config(config_path: str, data_dir: str, mappings_path: str = None):
     logger.info("Updating config: %s", config_path)
     logger.info("Data directory: %s", data_dir)
 
@@ -405,6 +502,20 @@ def update_config(config_path: str, data_dir: str):
                 image.pop("_computed", None)
                 image.pop("resolved_source", None)
         logger.info("Reset geometries and computed fields from manifest (idempotent).")
+
+    # ── Apply mappings from mappings.json ──
+    if mappings_path is None:
+        # Default: same directory as config, named <deck>_mappings.json
+        config_dir = os.path.dirname(config_path)
+        deck_name = config.get("deck", "")
+        if deck_name:
+            mappings_path = os.path.join(config_dir, f"{deck_name}_mappings.json")
+        else:
+            mappings_path = os.path.join(config_dir, "mappings.json")
+
+    applied = apply_mappings(config, mappings_path)
+    if applied > 0:
+        logger.info("")
 
     # Load all data sources
     logger.info("\nLoading data sources...")
@@ -827,5 +938,10 @@ if __name__ == "__main__":
         default="data",
         help="Path to the data directory (default: data)",
     )
+    parser.add_argument(
+        "-m", "--mappings",
+        default=None,
+        help="Path to mappings.json (default: configs/<deck>_mappings.json)",
+    )
     args = parser.parse_args()
-    update_config(args.config, args.data_dir)
+    update_config(args.config, args.data_dir, mappings_path=args.mappings)

@@ -1,0 +1,56 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'FILE=\"$CLAUDE_FILE_PATH\"; case \"$FILE\" in */component_library/_raw/*) echo \"BLOCKED: Do not manually edit _raw/ files. Use pipeline scripts instead.\"; exit 1;; */component_library/media/*) echo \"BLOCKED: Do not manually edit media files. Use replace_image.py instead.\"; exit 1;; */configs/*_mappings.json) exit 0;; */configs/*.json) echo \"BLOCKED: Do not manually edit config files. Write mappings.json via /map, then run /update-config.\"; exit 1;; *) exit 0;; esac'"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import inject; import reconstruct; import update_config; import generate_config; import deconstruct; print\\('All modules import successfully'\\)\")",
+      "Bash(python -m pytest tests/test_pipeline.py -v --tb=short 2>&1 | head -120)",
+      "Bash(python deconstruct.py \"Slides Examples.pptx\" --library component_library --force 2>&1)",
+      "Bash(python generate_config.py --library_dir component_library --configs_dir configs --force 2>&1)",
+      "Bash(python -m pytest tests/ -x -q 2>&1)",
+      "Bash(python -m pytest tests/ -v --tb=short 2>&1 | tail -35)",
+      "Bash(cd \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\pptx-pipeline\" && python -m py_compile layout.py deconstruct.py generate_config.py update_config.py inject.py 2>&1)",
+      "Bash(cd \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\pptx-pipeline\" && python -c \"import layout; print\\('layout.py imports OK'\\)\" 2>&1)",
+      "Read(//c/Users/MichaelHaddad/Desktop/pptx-pipeline/**)",
+      "Bash(__NEW_LINE_4b99ade0b7e3c9d1__ python:*)",
+      "Bash(python -m pytest tests/test_pipeline.py -q 2>&1 | tail -5)",
+      "WebSearch",
+      "Bash(cd C:/Users/MichaelHaddad/Desktop/pptx-pipeline && python -m pytest tests/test_auto_map.py -v 2>&1)",
+      "Bash(cd C:/Users/MichaelHaddad/Desktop/pptx-pipeline && python -m pytest tests/test_pipeline.py -q 2>&1 | tail -3)",
+      "Bash(cd C:/Users/MichaelHaddad/Desktop/pptx-pipeline && python -m pytest tests/test_auto_map.py tests/test_pipeline.py -q 2>&1)",
+      "Bash(cd C:/Users/MichaelHaddad/Desktop/pptx-pipeline && python -m pytest tests/ -q 2>&1)",
+      "Bash(ls \"C:/Users/MichaelHaddad/Desktop/pptx-pipeline/Slides Examples\"* 2>/dev/null; ls \"C:/Users/MichaelHaddad/Desktop/files \\(2\\).zip\" 2>/dev/null)",
+      "Bash(python -c \"import zipfile; z=zipfile.ZipFile\\('C:/Users/MichaelHaddad/Desktop/files \\(2\\).zip'\\); [print\\(n\\) for n in z.namelist\\(\\)]\")",
+      "Bash(mkdir -p C:/Users/MichaelHaddad/Desktop/pptx-pipeline/data/visuals && python -c \"\nimport zipfile, os\nz = zipfile.ZipFile\\('C:/Users/MichaelHaddad/Desktop/files \\(2\\).zip'\\)\nout = 'C:/Users/MichaelHaddad/Desktop/pptx-pipeline/data/visuals'\nz.extractall\\(out\\)\nfor f in os.listdir\\(out\\):\n    print\\(f\\)\n\")",
+      "Bash(pip install:*)",
+      "Bash(cd C:/Users/MichaelHaddad/Desktop/pptx-pipeline && python -c \"\nimport json\nwith open\\('configs/slides_examples.json'\\) as f:\n    cfg = json.load\\(f\\)\nfor sk, slide in cfg['slides'].items\\(\\):\n    dynamic = [s for s in slide['shapes'] if s.get\\('is_dynamic'\\)]\n    images = slide.get\\('images', []\\)\n    if dynamic or images:\n        print\\(f'\\\\n{sk} \\({len\\(dynamic\\)} dynamic shapes, {len\\(images\\)} images\\):'\\)\n        for s in dynamic:\n            print\\(f'  [{s[\\\\\"category\\\\\"]}] {s[\\\\\"shape_name\\\\\"]}: \\\\\"{s[\\\\\"text_preview\\\\\"][:60]}\\\\\"'\\)\n        for img in images:\n            print\\(f'  [img] {img[\\\\\"rid\\\\\"]} -> shape {img.get\\(\\\\\"target_shape_id\\\\\",\\\\\"?\\\\\"\\)} \\({img[\\\\\"target\\\\\"]}\\)'\\)\n\")",
+      "Bash(rm -f C:/Users/MichaelHaddad/Desktop/pptx-pipeline/recipes/*.json 2>/dev/null; cd C:/Users/MichaelHaddad/Desktop/pptx-pipeline && python run_pipeline.py \"Slides Examples.pptx\" --data-dir data/ --force --non-interactive 2>&1)",
+      "Bash(cd C:/Users/MichaelHaddad/Desktop/pptx-pipeline && python -c \"\nimport json\nfrom auto_map import build_shape_inventory, deterministic_match, extract_data_schema\n\nwith open\\('configs/slides_examples.json'\\) as f:\n    config = json.load\\(f\\)\n\nschema = extract_data_schema\\('data'\\)\nshapes = build_shape_inventory\\(config\\)\ndynamic = [s for s in shapes if s.get\\('is_dynamic'\\) or s['category'] == 'image_source']\n\nmatched, unmatched = deterministic_match\\(dynamic, schema\\)\n\nprint\\(f'=== MATCHED: {len\\(matched\\)} ==='\\)\nfor m in matched:\n    print\\(f'  [{m[\\\\\"method\\\\\"]}] {m[\\\\\"confidence\\\\\"]:.0%} {m[\\\\\"slide_key\\\\\"]} shape {m[\\\\\"shape_id\\\\\"]} -> {m[\\\\\"field\\\\\"]}'\\)\n\nprint\\(f'\\\\n=== UNMATCHED: {len\\(unmatched\\)} ==='\\)\nfor s in unmatched:\n    cat = s.get\\('category',''\\)\n    name = s.get\\('shape_name',''\\)\n    print\\(f'  {s[\\\\\"slide_key\\\\\"]} shape {s[\\\\\"shape_id\\\\\"]} \\\\\"{name}\\\\\" \\({cat}\\)'\\)\n\" 2>&1)",
+      "Bash(cd \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\pptx-pipeline\" && python run_pipeline.py \"Slides Examples.pptx\" --data-dir data/ --force --skip-deconstruct --non-interactive --output output2.pptx 2>&1)",
+      "Bash(cd \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\pptx-pipeline\" && python -m pytest tests/ -q 2>&1 | tail -10)",
+      "Bash(rm -f \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\pptx-pipeline\\\\recipes\\\\slides_examples_recipe.json\" && cd \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\pptx-pipeline\" && python run_pipeline.py \"Slides Examples.pptx\" --data-dir data/ --force --skip-deconstruct --non-interactive --output output2.pptx 2>&1)",
+      "Bash(rm -f \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\pptx-pipeline\\\\recipes\\\\slides_examples_recipe.json\" && cd \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\pptx-pipeline\" && python run_pipeline.py \"Slides Examples.pptx\" --data-dir data/ --force --skip-deconstruct --non-interactive --output output3.pptx 2>&1)",
+      "Bash(python:*)",
+      "Bash(git commit:*)",
+      "Bash(git add:*)",
+      "Bash(git push:*)",
+      "Skill(pipeline)",
+      "Skill(deconstruct)",
+      "Skill(generate-config)",
+      "Skill(map)",
+      "Skill(update-config)",
+      "Skill(reconstruct)"
+    ]
+  }
+}
