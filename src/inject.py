@@ -362,6 +362,129 @@ def _expand_newlines_to_paragraphs(shape_xml: str) -> str:
     return para_pattern.sub(_process_paragraph, shape_xml)
 
 
+def _replace_shape_text_paragraph_aware(shape_xml: str, new_value: str) -> tuple[str, bool] | tuple[None, bool]:
+    """Paragraph-aware text replacement for multi-paragraph shapes.
+
+    When the shape has multiple <a:p> paragraphs and the new text has \\n
+    delimiters matching the paragraph count, process each paragraph
+    independently. This preserves per-paragraph <a:pPr> (spacing, indent)
+    and assigns label text to the correct bold+colored run even when the
+    label text changes (e.g., 'Unified:' -> 'Managed:').
+
+    Returns (modified_shape_xml, True) on success, or (None, False) if
+    this strategy doesn't apply (caller should fall back).
+    """
+    new_paragraphs = new_value.split('\n')
+    if len(new_paragraphs) < 2:
+        return None, False
+
+    # Find all <a:p>...</a:p> paragraphs in the shape
+    para_pattern = re.compile(
+        r'(<[^>]*?:p\b[^>]*?>)(.*?)(</[^>]*?:p\s*>)',
+        re.DOTALL
+    )
+    at_pattern = re.compile(
+        r'(<[^>]*?:t\b[^>]*?>)(.*?)(</[^>]*?:t\s*>)',
+        re.DOTALL
+    )
+    rpr_pattern = re.compile(r'<[^>]*?:rPr\b[^>]*?(?:/>|>.*?</[^>]*?:rPr\s*>)', re.DOTALL)
+
+    para_matches = list(para_pattern.finditer(shape_xml))
+
+    # Only use paragraph-aware mode when the shape has multiple paragraphs
+    # with <a:r> runs containing text (skip empty/whitespace-only paragraphs)
+    text_paras = []
+    for pm in para_matches:
+        runs_in_para = list(at_pattern.finditer(pm.group(0)))
+        if runs_in_para:
+            # Check if any run has non-whitespace text
+            has_text = any(r.group(2).strip() for r in runs_in_para)
+            if has_text:
+                text_paras.append(pm)
+
+    if len(text_paras) < 2 or len(new_paragraphs) != len(text_paras):
+        return None, False
+
+    # Process each paragraph independently
+    new_shape_xml = shape_xml
+    # Work backwards to preserve offsets
+    for para_idx in range(len(text_paras) - 1, -1, -1):
+        pm = text_paras[para_idx]
+        para_xml = pm.group(0)
+        new_para_text = new_paragraphs[para_idx]
+
+        at_matches_in_para = list(at_pattern.finditer(para_xml))
+        if not at_matches_in_para:
+            continue
+
+        n_runs = len(at_matches_in_para)
+
+        # Classify runs as bold (label) or body within this paragraph
+        run_is_bold = []
+        for am in at_matches_in_para:
+            preceding = para_xml[:am.start()]
+            rpr_m = list(rpr_pattern.finditer(preceding))
+            is_bold = False
+            if rpr_m:
+                rpr_text = rpr_m[-1].group(0)
+                is_bold = bool(re.search(r'\bb\s*=\s*"(1|true)"', rpr_text, re.IGNORECASE))
+            run_is_bold.append(is_bold)
+
+        # Split the new paragraph text into label + body based on colon
+        colon_pos = new_para_text.find(':')
+        has_label = colon_pos != -1 and colon_pos < 60
+
+        # Build segments for this paragraph's runs
+        segments = [''] * n_runs
+
+        if has_label and any(run_is_bold):
+            # Put label (up to and including ': ') in the first bold run
+            label_part = new_para_text[:colon_pos + 1] + ' '
+            body_part = new_para_text[colon_pos + 1:].strip()
+
+            bold_idx = run_is_bold.index(True)
+            segments[bold_idx] = label_part
+
+            # Put body text in the first non-bold run after the bold run
+            body_idx = None
+            for i in range(bold_idx + 1, n_runs):
+                if not run_is_bold[i]:
+                    body_idx = i
+                    break
+            if body_idx is not None:
+                segments[body_idx] = body_part
+            else:
+                # No body run — append to bold run
+                segments[bold_idx] = label_part + body_part
+        else:
+            # No label structure or no bold runs — put everything in the
+            # first non-bold run (or first run if all bold)
+            target_idx = 0
+            for i in range(n_runs):
+                if not run_is_bold[i]:
+                    target_idx = i
+                    break
+            segments[target_idx] = new_para_text
+
+        # Apply segments to this paragraph (work backwards within paragraph)
+        new_para_xml = para_xml
+        for j in range(n_runs - 1, -1, -1):
+            am = at_matches_in_para[j]
+            escaped_segment = _escape_for_xml(segments[j])
+            new_at = am.group(1) + escaped_segment + am.group(3)
+            new_para_xml = new_para_xml[:am.start()] + new_at + new_para_xml[am.end():]
+
+        # Replace the paragraph in shape XML
+        para_start = pm.start()
+        para_end = pm.end()
+        # Adjust for prior replacements — use absolute positions in new_shape_xml
+        # Since we work backwards, positions are still valid
+        new_shape_xml = new_shape_xml[:para_start] + new_para_xml + new_shape_xml[para_end:]
+
+    logger.debug("    [path] paragraph-aware replacement, %d paragraphs", len(text_paras))
+    return new_shape_xml, True
+
+
 def _replace_shape_text(shape_xml: str, new_value: str) -> tuple[str, bool]:
     """
     Replace the text content of a shape with new_value, preserving run formatting.
@@ -376,6 +499,11 @@ def _replace_shape_text(shape_xml: str, new_value: str) -> tuple[str, bool]:
 
     Returns (modified_shape_xml, was_modified).
     """
+    # Try paragraph-aware replacement first for multi-paragraph shapes
+    result, success = _replace_shape_text_paragraph_aware(shape_xml, new_value)
+    if success:
+        return result, True
+
     at_pattern = re.compile(
         r'(<[^>]*?:t\b[^>]*?>)(.*?)(</[^>]*?:t\s*>)',
         re.DOTALL
@@ -1532,6 +1660,261 @@ def _auto_shift_below_image(xml_str: str, image_shape_id: str,
     return xml_str, shifted_ids
 
 
+def _normalize_image_gaps(xml_str: str, image_shape_ids: list, all_shapes: list) -> str:
+    """Equalize vertical gaps between stacked images in the same column.
+
+    After image resizing and auto-shift, gaps between image sections may be
+    unequal. This function finds ALL images in the same column (including
+    static ones) and labels between them, computes compact uniform gaps,
+    and repositions everything.
+
+    All new positions are computed first, then applied bottom-to-top to
+    avoid XML offset invalidation.
+
+    Args:
+        xml_str: full slide XML string
+        image_shape_ids: list of dynamic image shape id strings
+        all_shapes: list of all shape dicts from config
+
+    Returns:
+        modified xml_str
+    """
+    if not image_shape_ids:
+        return xml_str
+
+    off_pattern = re.compile(
+        r'<[^>]*?:off\b[^>]*?\bx\s*=\s*"(\d+)"[^>]*?\by\s*=\s*"(\d+)"'
+    )
+    ext_pattern = re.compile(
+        r'<[^>]*?:ext\b[^>]*?\bcx\s*=\s*"(\d+)"[^>]*?\bcy\s*=\s*"(\d+)"'
+    )
+    half_slide = SLIDE_WIDTH_EMU // 2
+
+    def _read_geo_from_xml(sid):
+        span = _find_shape_span(xml_str, sid)
+        if not span:
+            return None
+        snippet = xml_str[span[0]:span[1]]
+        off_m = off_pattern.search(snippet)
+        ext_m = ext_pattern.search(snippet)
+        if off_m and ext_m:
+            return {
+                "x": int(off_m.group(1)), "y": int(off_m.group(2)),
+                "cx": int(ext_m.group(1)), "cy": int(ext_m.group(2)),
+            }
+        return None
+
+    # Collect ALL image shapes in the same column (including static)
+    dynamic_set = set(image_shape_ids)
+    image_entries = []  # (sid, geo)
+    for s in all_shapes:
+        sid = str(s.get("shape_id", ""))
+        if s.get("category") == "image" or sid in dynamic_set:
+            geo = _read_geo_from_xml(sid)
+            if geo:
+                image_entries.append((sid, geo))
+
+    if len(image_entries) < 2:
+        return xml_str
+
+    # Determine column from first dynamic image
+    ref_geo = next(g for sid, g in image_entries if sid in dynamic_set)
+    col_is_left = (ref_geo["x"] + ref_geo["cx"] // 2) < half_slide
+
+    # Filter to same column and sort by y
+    col_images = [(sid, geo) for sid, geo in image_entries
+                  if ((geo["x"] + geo["cx"] // 2) < half_slide) == col_is_left]
+    col_images.sort(key=lambda x: x[1]["y"])
+
+    if len(col_images) < 2:
+        return xml_str
+
+    # Build set of image y positions to detect overlay shapes
+    image_y_positions = set()
+    for _, geo in col_images:
+        image_y_positions.add(geo["y"])
+
+    # Find text labels sitting between consecutive images
+    # Exclude overlay shapes (Content Placeholders that sit on top of images)
+    labels_per_section = {}  # section_index -> [(sid, geo)]
+    for s in all_shapes:
+        sid = str(s.get("shape_id", ""))
+        if s.get("category") != "text":
+            continue
+        geo = _read_geo_from_xml(sid)
+        if not geo:
+            continue
+        # Skip overlay shapes: text shapes whose y is within 20K EMU of an image's y
+        is_overlay = any(abs(geo["y"] - img_y) < 20000 for img_y in image_y_positions)
+        if is_overlay:
+            continue
+        s_center = geo["x"] + geo["cx"] // 2
+        if (s_center < half_slide) != col_is_left:
+            continue
+        # Check which inter-image section this label belongs to
+        for i in range(len(col_images) - 1):
+            _, g_top = col_images[i]
+            _, g_bot = col_images[i + 1]
+            top_bottom = g_top["y"] + g_top["cy"]
+            bot_top = g_bot["y"]
+            if top_bottom - 10000 <= geo["y"] < bot_top + 10000:
+                labels_per_section.setdefault(i, []).append((sid, geo))
+                break
+
+    # Gap constants
+    SECTION_GAP = 50000   # Gap from image-bottom to next label-top
+    LABEL_IMG_GAP = 5000  # Gap from label-bottom to next image-top
+
+    # Build ordered list of elements with their target y positions.
+    # First image keeps its position as anchor.
+    moves = []  # list of (sid, current_y, new_y) — to be applied bottom-up
+
+    for i in range(1, len(col_images)):
+        sid_prev, geo_prev = col_images[i - 1]
+        sid_cur, geo_cur = col_images[i]
+        section_idx = i - 1
+
+        # Previous image's effective y (might have been repositioned)
+        prev_y = geo_prev["y"]
+        for _, _, new_y in moves:
+            # Check if we already repositioned the previous image
+            pass
+        # Look up the new y for the previous image from moves
+        for m_sid, m_old, m_new in moves:
+            if m_sid == sid_prev:
+                prev_y = m_new
+                break
+
+        prev_bottom = prev_y + geo_prev["cy"]
+
+        # Position labels in this section
+        section_labels = labels_per_section.get(section_idx, [])
+        section_labels.sort(key=lambda x: x[1]["y"])
+
+        cursor = prev_bottom + SECTION_GAP
+        for lbl_sid, lbl_geo in section_labels:
+            moves.append((lbl_sid, lbl_geo["y"], cursor))
+            cursor += lbl_geo["cy"] + LABEL_IMG_GAP
+
+        # Position next image
+        if not section_labels:
+            cursor = prev_bottom + SECTION_GAP
+        moves.append((sid_cur, geo_cur["y"], cursor))
+
+    # Log
+    current_gaps = []
+    for i in range(len(col_images) - 1):
+        _, g1 = col_images[i]
+        _, g2 = col_images[i + 1]
+        current_gaps.append(g2["y"] - (g1["y"] + g1["cy"]))
+    logger.info("    [gap-norm] current image gaps=%s", current_gaps)
+
+    # Apply moves bottom-to-top (reverse order) to avoid offset invalidation
+    for sid, old_y, new_y in reversed(moves):
+        if new_y == old_y:
+            continue
+        span = _find_shape_span(xml_str, sid)
+        if not span:
+            continue
+        ss, se = span
+        shape_xml = xml_str[ss:se]
+        off_re = re.compile(
+            r'(<[^>]*?:off\b[^>]*?\bx\s*=\s*")(\d+)("[^>]*?\by\s*=\s*")(\d+)(")'
+        )
+        m = off_re.search(shape_xml)
+        if m:
+            shape_xml = off_re.sub(
+                lambda m_: m_.group(1) + m_.group(2) + m_.group(3) + str(new_y) + m_.group(5),
+                shape_xml, count=1
+            )
+            xml_str = xml_str[:ss] + shape_xml + xml_str[se:]
+            logger.info("    [gap-norm] id=%s: y %d -> %d (delta=%d)",
+                        sid, old_y, new_y, new_y - old_y)
+
+    return xml_str
+
+
+def _sync_overlay_positions(xml_str: str, all_shapes: list) -> str:
+    """Sync overlay shapes' y positions to match their parent image shapes.
+
+    Overlay shapes (e.g., Content Placeholders) sit on top of images. After
+    image resizing and gap normalization, overlays may have stale y positions.
+    This function identifies overlay-image pairs by matching cy values (already
+    synced by _detect_and_resize_overlays) and aligns the overlay's y to the
+    image's current y.
+
+    Args:
+        xml_str: full slide XML string
+        all_shapes: list of all shape dicts from config
+
+    Returns:
+        modified xml_str
+    """
+    off_pattern = re.compile(
+        r'<[^>]*?:off\b[^>]*?\bx\s*=\s*"(\d+)"[^>]*?\by\s*=\s*"(\d+)"'
+    )
+    ext_pattern = re.compile(
+        r'<[^>]*?:ext\b[^>]*?\bcx\s*=\s*"(\d+)"[^>]*?\bcy\s*=\s*"(\d+)"'
+    )
+
+    # Read current geometry of all shapes from XML
+    shape_geos = {}
+    for s in all_shapes:
+        sid = str(s.get("shape_id", ""))
+        span = _find_shape_span(xml_str, sid)
+        if not span:
+            continue
+        snippet = xml_str[span[0]:span[1]]
+        off_m = off_pattern.search(snippet)
+        ext_m = ext_pattern.search(snippet)
+        if off_m and ext_m:
+            shape_geos[sid] = {
+                "x": int(off_m.group(1)), "y": int(off_m.group(2)),
+                "cx": int(ext_m.group(1)), "cy": int(ext_m.group(2)),
+                "category": s.get("category", ""),
+            }
+
+    # Identify image shapes and potential overlays
+    image_shapes = {sid: geo for sid, geo in shape_geos.items()
+                    if geo["category"] == "image"}
+    non_image_shapes = {sid: geo for sid, geo in shape_geos.items()
+                        if geo["category"] != "image" and geo["category"] != ""}
+
+    # Match overlays to images: an overlay has the same cy as an image and
+    # its x range falls within the image's x range
+    moves = []
+    for oid, ogeo in non_image_shapes.items():
+        for iid, igeo in image_shapes.items():
+            if abs(ogeo["cy"] - igeo["cy"]) <= 10 and ogeo["y"] != igeo["y"]:
+                # Check x overlap: overlay sits within image bounds
+                if (ogeo["x"] >= igeo["x"] - 10000 and
+                        ogeo["x"] + ogeo["cx"] <= igeo["x"] + igeo["cx"] + 10000):
+                    moves.append((oid, ogeo["y"], igeo["y"]))
+                    break
+
+    # Apply moves bottom-to-top
+    for oid, old_y, new_y in sorted(moves, key=lambda m: -m[1]):
+        span = _find_shape_span(xml_str, oid)
+        if not span:
+            continue
+        ss, se = span
+        shape_xml = xml_str[ss:se]
+        off_re = re.compile(
+            r'(<[^>]*?:off\b[^>]*?\bx\s*=\s*")(\d+)("[^>]*?\by\s*=\s*")(\d+)(")'
+        )
+        m = off_re.search(shape_xml)
+        if m:
+            shape_xml = off_re.sub(
+                lambda m_: m_.group(1) + m_.group(2) + m_.group(3) + str(new_y) + m_.group(5),
+                shape_xml, count=1
+            )
+            xml_str = xml_str[:ss] + shape_xml + xml_str[se:]
+            logger.info("    [ok] Overlay id=%s: synced y %d -> %d (matched parent image)",
+                        oid, old_y, new_y)
+
+    return xml_str
+
+
 def _check_slide_bounds(xml_str: str, all_shapes: list, images_with_geometry: list) -> str:
     """Check if any shape exceeds slide bounds after image expansion and shifts.
 
@@ -1871,7 +2254,12 @@ def inject_slide(slide_xml_path: str, shapes_to_inject: list, dry_run: bool = Fa
                 if at_matches_tr and 0 <= target_run < len(at_matches_tr):
                     new_shape_xml = shape_xml
                     am = at_matches_tr[target_run]
-                    escaped_val = _escape_for_xml(resolved_value)
+                    # Preserve leading/trailing whitespace from the original run text
+                    orig_text = am.group(2)
+                    orig_unescaped = orig_text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&apos;', "'")
+                    leading_ws = orig_unescaped[:len(orig_unescaped) - len(orig_unescaped.lstrip())]
+                    trailing_ws = orig_unescaped[len(orig_unescaped.rstrip()):]
+                    escaped_val = _escape_for_xml(leading_ws + resolved_value + trailing_ws)
                     new_at = am.group(1) + escaped_val + am.group(3)
                     new_shape_xml = new_shape_xml[:am.start()] + new_at + new_shape_xml[am.end():]
                     xml_str = xml_str[:start] + new_shape_xml + xml_str[end:]
@@ -2321,6 +2709,13 @@ def inject(config_path: str = "configs/slides_examples.json", library_path: str 
                             img_xml_str = img_xml_str[:ss] + shape_xml + img_xml_str[se:]
                             logger.info("    [ok] Shape id=%s: repositioned to y=%d, cy=%d",
                                         shape_id, new_y, new_cy or 0)
+
+                    # Normalize gaps between stacked images in the same column
+                    image_ids = [str(img["target_shape_id"]) for img in images_with_geometry]
+                    img_xml_str = _normalize_image_gaps(img_xml_str, image_ids, slide["shapes"])
+
+                    # Sync overlay shapes (Content Placeholders etc.) to their parent images
+                    img_xml_str = _sync_overlay_positions(img_xml_str, slide["shapes"])
 
                     # Item 11: Slide bounds checking — warn and scale if overflow > 5%
                     img_xml_str = _check_slide_bounds(img_xml_str, slide["shapes"], images_with_geometry)
