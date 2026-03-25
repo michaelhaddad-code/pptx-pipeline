@@ -418,6 +418,9 @@ def apply_mappings(config: dict, mappings_path: str) -> int:
 
         if mapping_type in ("text", "table"):
             target_shape["data_field"] = entry.get("data_field", "")
+            # Pass through target_run if specified (for replacing a specific run only)
+            if "target_run" in entry:
+                target_shape["target_run"] = entry["target_run"]
             logger.info("  ok %s shape_id=%s -> data_field='%s' (%s)",
                         slide_key, shape_id, target_shape["data_field"], mapping_type)
 

@@ -1860,7 +1860,7 @@ def inject_slide(slide_xml_path: str, shapes_to_inject: list, dry_run: bool = Fa
             start, end = span
             shape_xml = xml_str[start:end]
 
-            # target_run: place text directly in a specific run, emptying all others
+            # target_run: replace text in a specific run only, preserving all others
             target_run = shape.get("target_run")
             if target_run is not None and isinstance(target_run, int):
                 at_pattern_tr = re.compile(
@@ -1870,14 +1870,10 @@ def inject_slide(slide_xml_path: str, shapes_to_inject: list, dry_run: bool = Fa
                 at_matches_tr = list(at_pattern_tr.finditer(shape_xml))
                 if at_matches_tr and 0 <= target_run < len(at_matches_tr):
                     new_shape_xml = shape_xml
-                    for j in range(len(at_matches_tr) - 1, -1, -1):
-                        am = at_matches_tr[j]
-                        if j == target_run:
-                            escaped_val = _escape_for_xml(resolved_value)
-                            new_at = am.group(1) + escaped_val + am.group(3)
-                        else:
-                            new_at = am.group(1) + am.group(3)
-                        new_shape_xml = new_shape_xml[:am.start()] + new_at + new_shape_xml[am.end():]
+                    am = at_matches_tr[target_run]
+                    escaped_val = _escape_for_xml(resolved_value)
+                    new_at = am.group(1) + escaped_val + am.group(3)
+                    new_shape_xml = new_shape_xml[:am.start()] + new_at + new_shape_xml[am.end():]
                     xml_str = xml_str[:start] + new_shape_xml + xml_str[end:]
                     _xml_dirty = True
                     total_replacements += 1
