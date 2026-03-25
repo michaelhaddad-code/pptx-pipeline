@@ -1485,218 +1485,44 @@ SLIDE_WIDTH_EMU = 12192000   # Standard 10" (16:9) slide width
 SLIDE_HEIGHT_EMU = 6858000   # Standard 7.5" slide height
 
 
-# ── Image auto-shift and overlay logic ────────────────────────────────────
+# ── Consolidated image layout ─────────────────────────────────────────────
 
-def _detect_and_resize_overlays(xml_str: str, image_shape_id: str,
-                                 image_x: int, image_y: int,
-                                 image_cx: int, image_original_cy: int,
-                                 new_image_cy: int, all_shapes: list) -> tuple:
-    """Find shapes overlapping an image and resize their cy proportionally.
+def _layout_image_sections(xml_str: str, images_with_geometry: list,
+                           all_shapes: list) -> str:
+    """Single-pass layout for stacked image sections after image file replacement.
 
-    An overlay is a shape whose bounding box falls within the image's original
-    bounding box (same x range, y within image's original y range).
+    Replaces _auto_shift_below_image, _normalize_image_gaps,
+    _sync_overlay_positions, _detect_and_resize_overlays, and _check_slide_bounds
+    with one consolidated pass.
 
-    Args:
-        xml_str: full slide XML string
-        image_shape_id: the image shape's id (to skip)
-        image_x, image_y: image position in EMU
-        image_cx, image_original_cy: image original dimensions in EMU
-        new_image_cy: image new (expanded) cy in EMU
-        all_shapes: list of shape dicts from config
-
-    Returns:
-        (modified_xml_str, set of overlay shape ids)
+    STEP 1: Determine final cy for every image (aspect ratio at column width).
+    STEP 2: One top-to-bottom layout pass — place each label then image using
+            the final cy values, with uniform 50K gaps.
+    STEP 3: Apply all position + size changes to XML in one bottom-to-top pass.
     """
-    overlay_ids = set()
-    if image_original_cy <= 0:
-        return xml_str, overlay_ids
-
-    ratio = new_image_cy / image_original_cy
-
-    for s in all_shapes:
-        sid = str(s.get("shape_id", ""))
-        if sid == str(image_shape_id):
-            continue
-        geo = s.get("geometry")
-        if not geo:
-            continue
-
-        sx = geo.get("x", 0)
-        sy = geo.get("y", 0)
-        scx = geo.get("cx", 0)
-        scy = geo.get("cy", 0)
-
-        # Check overlap: shape's x range overlaps image's x range,
-        # and shape is vertically within the image's original bounds (with 10000 EMU tolerance)
-        _tol = 10000  # ~0.01 inch tolerance for rounding differences
-        if (sx < image_x + image_cx and sx + scx > image_x and
-                sy >= image_y - _tol and sy + scy <= image_y + image_original_cy + _tol):
-            overlay_ids.add(sid)
-            new_overlay_cy = int(scy * ratio)
-
-            span = _find_shape_span(xml_str, sid)
-            if span is None:
-                continue
-            ss, se = span
-            shape_xml = xml_str[ss:se]
-
-            ext_pattern = re.compile(
-                r'(<[^>]*?:ext\b[^>]*?\bcx\s*=\s*")(\d+)("[^>]*?\bcy\s*=\s*")(\d+)(")'
-            )
-            ext_m = ext_pattern.search(shape_xml)
-            if ext_m and int(ext_m.group(4)) != new_overlay_cy:
-                shape_xml = ext_pattern.sub(
-                    lambda m: m.group(1) + m.group(2) + m.group(3) + str(new_overlay_cy) + m.group(5),
-                    shape_xml, count=1
-                )
-                xml_str = xml_str[:ss] + shape_xml + xml_str[se:]
-                logger.info("    [ok] Overlay shape id=%s: resized cy %d -> %d", sid, scy, new_overlay_cy)
-
-    return xml_str, overlay_ids
-
-
-def _auto_shift_below_image(xml_str: str, image_shape_id: str,
-                             image_x: int, image_y: int,
-                             image_cx: int, original_cy: int,
-                             new_cy: int, all_shapes: list,
-                             overlay_ids: set = None) -> str:
-    """Shift shapes below an expanded image down by the height delta.
-
-    Determines image column (left/right of slide center), then for each shape
-    on the slide that is below the image and in the same column, shifts its
-    y position down by (new_cy - original_cy).
-
-    For group shapes (category == "group"), shifts the group's own
-    <p:grpSpPr><a:xfrm><a:off> y attribute without touching children.
-
-    Args:
-        xml_str: full slide XML string
-        image_shape_id: the image shape's id (to skip)
-        image_x, image_y: image position in EMU
-        image_cx, original_cy: image original dimensions in EMU
-        new_cy: image new (expanded) cy in EMU
-        all_shapes: list of shape dicts from config
-        overlay_ids: set of shape ids that are overlays (to skip)
-
-    Returns:
-        modified xml_str
-    """
-    delta = new_cy - original_cy
-    shifted_ids = set()
-    if delta == 0:
-        return xml_str, shifted_ids
-
-    if overlay_ids is None:
-        overlay_ids = set()
-
-    # Determine image column: center of image vs center of slide
-    half_slide = SLIDE_WIDTH_EMU // 2
-    image_center_x = image_x + image_cx // 2
-    image_is_left = image_center_x < half_slide
-
-    # Bottom edge of original image
-    image_bottom = image_y + original_cy
-
-    for s in all_shapes:
-        sid = str(s.get("shape_id", ""))
-        if sid == str(image_shape_id):
-            continue
-        if sid in overlay_ids:
-            continue
-
-        geo = s.get("geometry")
-        if not geo:
-            continue
-
-        sx = geo.get("x", 0)
-        sy = geo.get("y", 0)
-        scx = geo.get("cx", 0)
-
-        # Check same column
-        shape_center_x = sx + scx // 2
-        shape_is_left = shape_center_x < half_slide
-        if shape_is_left != image_is_left:
-            continue
-
-        # Check if shape is below the image's original bottom
-        if sy < image_bottom:
-            continue
-
-        new_y = sy + delta
-        category = s.get("category", "")
-
-        span = _find_shape_span(xml_str, sid)
-        if span is None:
-            continue
-        ss, se = span
-        shape_xml = xml_str[ss:se]
-
-        if category == "group":
-            # For groups, shift only the group-level <a:off> (first one in grpSpPr)
-            grp_off_pattern = re.compile(
-                r'(<[^>]*?:grpSpPr\b[^>]*?>.*?<[^>]*?:off\b[^>]*?\bx\s*=\s*")(\d+)("[^>]*?\by\s*=\s*")(\d+)(")',
-                re.DOTALL
-            )
-            m = grp_off_pattern.search(shape_xml)
-            if m:
-                shape_xml = shape_xml[:m.start(4)] + str(new_y) + shape_xml[m.end(4):]
-        else:
-            # Regular shape: shift the first <a:off>
-            off_pattern = re.compile(
-                r'(<[^>]*?:off\b[^>]*?\bx\s*=\s*")(\d+)("[^>]*?\by\s*=\s*")(\d+)(")'
-            )
-            m = off_pattern.search(shape_xml)
-            if m:
-                shape_xml = off_pattern.sub(
-                    lambda m: m.group(1) + m.group(2) + m.group(3) + str(new_y) + m.group(5),
-                    shape_xml, count=1
-                )
-
-        xml_str = xml_str[:ss] + shape_xml + xml_str[se:]
-        shifted_ids.add(sid)
-        logger.info("    [ok] Auto-shift shape id=%s ('%s'): y %d -> %d (delta=%d)",
-                     sid, s.get("shape_name", ""), sy, new_y, delta)
-
-    return xml_str, shifted_ids
-
-
-def _normalize_image_gaps(xml_str: str, image_shape_ids: list, all_shapes: list) -> str:
-    """Equalize vertical gaps between stacked images in the same column.
-
-    After image resizing and auto-shift, gaps between image sections may be
-    unequal. This function finds ALL images in the same column (including
-    static ones) and labels between them, computes compact uniform gaps,
-    and repositions everything.
-
-    All new positions are computed first, then applied bottom-to-top to
-    avoid XML offset invalidation.
-
-    Args:
-        xml_str: full slide XML string
-        image_shape_ids: list of dynamic image shape id strings
-        all_shapes: list of all shape dicts from config
-
-    Returns:
-        modified xml_str
-    """
-    if not image_shape_ids:
+    if not images_with_geometry:
         return xml_str
 
-    off_pattern = re.compile(
+    SECTION_GAP = 50000   # gap before each label
+    LABEL_IMG_GAP = 5000  # gap between label bottom and image top
+    SLIDE_BOTTOM_MARGIN = 50000
+
+    off_re = re.compile(
         r'<[^>]*?:off\b[^>]*?\bx\s*=\s*"(\d+)"[^>]*?\by\s*=\s*"(\d+)"'
     )
-    ext_pattern = re.compile(
+    ext_re = re.compile(
         r'<[^>]*?:ext\b[^>]*?\bcx\s*=\s*"(\d+)"[^>]*?\bcy\s*=\s*"(\d+)"'
     )
     half_slide = SLIDE_WIDTH_EMU // 2
 
-    def _read_geo_from_xml(sid):
+    # ── Helper: read current geometry from XML ──
+    def _read_xml_geo(sid):
         span = _find_shape_span(xml_str, sid)
         if not span:
             return None
         snippet = xml_str[span[0]:span[1]]
-        off_m = off_pattern.search(snippet)
-        ext_m = ext_pattern.search(snippet)
+        off_m = off_re.search(snippet)
+        ext_m = ext_re.search(snippet)
         if off_m and ext_m:
             return {
                 "x": int(off_m.group(1)), "y": int(off_m.group(2)),
@@ -1704,271 +1530,239 @@ def _normalize_image_gaps(xml_str: str, image_shape_ids: list, all_shapes: list)
             }
         return None
 
-    # Collect ALL image shapes in the same column (including static)
-    dynamic_set = set(image_shape_ids)
-    image_entries = []  # (sid, geo)
+    # ── STEP 1: Compute final cy for every dynamic image ──
+    dynamic_ids = set()
+    final_cys = {}  # shape_id -> final cy
+    for img in images_with_geometry:
+        sid = str(img["target_shape_id"])
+        dynamic_ids.add(sid)
+        computed = img["_computed"]
+        geo = _read_xml_geo(sid)
+        if not geo:
+            continue
+        img_w = computed.get("img_width_px", 0)
+        img_h = computed.get("img_height_px", 0)
+        if img_w and img_h and geo["cx"]:
+            final_cys[sid] = int(round(geo["cx"] * (img_h / img_w)))
+        else:
+            final_cys[sid] = computed.get("cy", geo["cy"])
+
+    # ── Collect ALL images in the same column (including static) ──
+    all_image_entries = []  # (sid, geo_from_xml)
     for s in all_shapes:
         sid = str(s.get("shape_id", ""))
-        if s.get("category") == "image" or sid in dynamic_set:
-            geo = _read_geo_from_xml(sid)
+        if s.get("category") == "image" or sid in dynamic_ids:
+            geo = _read_xml_geo(sid)
             if geo:
-                image_entries.append((sid, geo))
+                all_image_entries.append((sid, geo))
 
-    if len(image_entries) < 2:
+    if not all_image_entries:
         return xml_str
 
     # Determine column from first dynamic image
-    ref_geo = next(g for sid, g in image_entries if sid in dynamic_set)
+    ref_sid = str(images_with_geometry[0]["target_shape_id"])
+    ref_geo = next((g for sid, g in all_image_entries if sid == ref_sid), None)
+    if not ref_geo:
+        return xml_str
     col_is_left = (ref_geo["x"] + ref_geo["cx"] // 2) < half_slide
 
-    # Filter to same column and sort by y
-    col_images = [(sid, geo) for sid, geo in image_entries
-                  if ((geo["x"] + geo["cx"] // 2) < half_slide) == col_is_left]
-    col_images.sort(key=lambda x: x[1]["y"])
+    # Filter to same column, sort by y
+    col_images = sorted(
+        [(sid, geo) for sid, geo in all_image_entries
+         if ((geo["x"] + geo["cx"] // 2) < half_slide) == col_is_left],
+        key=lambda x: x[1]["y"]
+    )
 
-    if len(col_images) < 2:
+    if not col_images:
         return xml_str
 
-    # Build set of image y positions to detect overlay shapes
-    image_y_positions = set()
-    for _, geo in col_images:
-        image_y_positions.add(geo["y"])
+    # For static images, final cy = current cy (unchanged)
+    for sid, geo in col_images:
+        if sid not in final_cys:
+            final_cys[sid] = geo["cy"]
 
-    # Find text labels sitting between consecutive images
-    # Exclude overlay shapes (Content Placeholders that sit on top of images)
+    # ── Build set of group-child shape ids to skip ──
+    group_child_ids = {str(s.get("shape_id", "")) for s in all_shapes if s.get("parent_group")}
+
+    # ── Identify overlay shapes (Content Placeholders sitting on images) ──
+    image_y_set = {geo["y"] for _, geo in col_images}
+    overlay_parent = {}  # overlay_sid -> image_sid
+    for s in all_shapes:
+        sid = str(s.get("shape_id", ""))
+        if sid in dynamic_ids or sid in group_child_ids:
+            continue
+        geo = _read_xml_geo(sid)
+        if not geo:
+            continue
+        # Overlay = shape whose y matches an image y (within tolerance)
+        # and whose x range falls within the image's x range
+        for img_sid, img_geo in col_images:
+            if (abs(geo["y"] - img_geo["y"]) < 20000 and
+                    geo["x"] >= img_geo["x"] - 10000 and
+                    geo["x"] + geo["cx"] <= img_geo["x"] + img_geo["cx"] + 10000 and
+                    sid != img_sid):
+                overlay_parent[sid] = img_sid
+                break
+
+    # ── Find text labels between consecutive images ──
     labels_per_section = {}  # section_index -> [(sid, geo)]
     for s in all_shapes:
         sid = str(s.get("shape_id", ""))
-        if s.get("category") != "text":
+        if s.get("category") != "text" or sid in overlay_parent or sid in group_child_ids:
             continue
-        geo = _read_geo_from_xml(sid)
+        geo = _read_xml_geo(sid)
         if not geo:
             continue
-        # Skip overlay shapes: text shapes whose y is within 20K EMU of an image's y
-        is_overlay = any(abs(geo["y"] - img_y) < 20000 for img_y in image_y_positions)
-        if is_overlay:
+        if any(abs(geo["y"] - iy) < 20000 for iy in image_y_set):
             continue
         s_center = geo["x"] + geo["cx"] // 2
         if (s_center < half_slide) != col_is_left:
             continue
-        # Check which inter-image section this label belongs to
+        # Assign to section by original y order (between image tops)
         for i in range(len(col_images) - 1):
             _, g_top = col_images[i]
             _, g_bot = col_images[i + 1]
-            top_bottom = g_top["y"] + g_top["cy"]
-            bot_top = g_bot["y"]
-            if top_bottom - 10000 <= geo["y"] < bot_top + 10000:
+            if g_top["y"] - 10000 <= geo["y"] < g_bot["y"] + 10000:
                 labels_per_section.setdefault(i, []).append((sid, geo))
                 break
 
-    # Gap constants
-    SECTION_GAP = 50000   # Gap from image-bottom to next label-top
-    LABEL_IMG_GAP = 5000  # Gap from label-bottom to next image-top
+    # ── Find the anchor label (closest label above first image, same column) ──
+    first_img_y = col_images[0][1]["y"]
+    anchor_label = None
+    for s in all_shapes:
+        sid = str(s.get("shape_id", ""))
+        if s.get("category") != "text" or sid in group_child_ids:
+            continue
+        geo = _read_xml_geo(sid)
+        if not geo:
+            continue
+        s_center = geo["x"] + geo["cx"] // 2
+        if (s_center < half_slide) != col_is_left:
+            continue
+        # Must be above the first image, and closest to it (highest y that's still above)
+        if geo["y"] < first_img_y and geo["y"] + geo["cy"] <= first_img_y + 20000:
+            if anchor_label is None or geo["y"] > anchor_label[1]["y"]:
+                anchor_label = (sid, geo)
 
-    # Build ordered list of elements with their target y positions.
-    # First image keeps its position as anchor.
-    moves = []  # list of (sid, current_y, new_y) — to be applied bottom-up
+    # ── STEP 2: Compute available space and scale if needed ──
+    anchor_y = anchor_label[1]["y"] if anchor_label else first_img_y
+    available = SLIDE_HEIGHT_EMU - anchor_y - SLIDE_BOTTOM_MARGIN
 
-    for i in range(1, len(col_images)):
-        sid_prev, geo_prev = col_images[i - 1]
-        sid_cur, geo_cur = col_images[i]
-        section_idx = i - 1
+    # Tally fixed heights (labels + gaps)
+    total_label_h = 0
+    total_gaps = 0
+    # Anchor label
+    if anchor_label:
+        total_label_h += anchor_label[1]["cy"]
+        total_gaps += LABEL_IMG_GAP
+    # Inter-image labels
+    for i in range(len(col_images) - 1):
+        section_labels = labels_per_section.get(i, [])
+        total_gaps += SECTION_GAP
+        for _, lg in section_labels:
+            total_label_h += lg["cy"]
+            total_gaps += LABEL_IMG_GAP
 
-        # Previous image's effective y (might have been repositioned)
-        prev_y = geo_prev["y"]
-        for _, _, new_y in moves:
-            # Check if we already repositioned the previous image
-            pass
-        # Look up the new y for the previous image from moves
-        for m_sid, m_old, m_new in moves:
-            if m_sid == sid_prev:
-                prev_y = m_new
-                break
+    total_image_h = sum(final_cys[sid] for sid, _ in col_images)
+    total_needed = total_image_h + total_label_h + total_gaps
 
-        prev_bottom = prev_y + geo_prev["cy"]
+    scale = 1.0
+    if total_needed > available and total_image_h > 0:
+        space_for_images = available - total_label_h - total_gaps
+        if space_for_images > 0:
+            scale = space_for_images / total_image_h
+            logger.info("    [layout] scaling images to %.1f%% to fit slide", scale * 100)
+    # Apply scale
+    for sid in final_cys:
+        final_cys[sid] = int(final_cys[sid] * scale)
 
-        # Position labels in this section
-        section_labels = labels_per_section.get(section_idx, [])
+    # ── Top-to-bottom layout pass ──
+    positions = {}  # sid -> new_y
+    sizes = {}      # sid -> new_cy
+
+    # Anchor label stays in place
+    if anchor_label:
+        cursor = anchor_label[1]["y"] + anchor_label[1]["cy"] + LABEL_IMG_GAP
+    else:
+        cursor = first_img_y
+
+    for idx, (img_sid, img_geo) in enumerate(col_images):
+        # Place image
+        positions[img_sid] = cursor
+        sizes[img_sid] = final_cys[img_sid]
+        cursor += final_cys[img_sid]
+
+        # Place section labels after this image (before next image)
+        section_labels = labels_per_section.get(idx, [])
         section_labels.sort(key=lambda x: x[1]["y"])
-
-        cursor = prev_bottom + SECTION_GAP
+        if section_labels or idx < len(col_images) - 1:
+            cursor += SECTION_GAP
         for lbl_sid, lbl_geo in section_labels:
-            moves.append((lbl_sid, lbl_geo["y"], cursor))
+            positions[lbl_sid] = cursor
             cursor += lbl_geo["cy"] + LABEL_IMG_GAP
 
-        # Position next image
-        if not section_labels:
-            cursor = prev_bottom + SECTION_GAP
-        moves.append((sid_cur, geo_cur["y"], cursor))
+    # Position overlays to match their parent image
+    for ov_sid, parent_sid in overlay_parent.items():
+        if parent_sid in positions:
+            positions[ov_sid] = positions[parent_sid]
+        if parent_sid in sizes:
+            sizes[ov_sid] = sizes[parent_sid]
 
-    # Log
-    current_gaps = []
-    for i in range(len(col_images) - 1):
-        _, g1 = col_images[i]
-        _, g2 = col_images[i + 1]
-        current_gaps.append(g2["y"] - (g1["y"] + g1["cy"]))
-    logger.info("    [gap-norm] current image gaps=%s", current_gaps)
+    # ── STEP 3: Apply ALL changes to XML in one bottom-to-top pass ──
+    # Collect all (sid, new_y, new_cy) sorted by current y descending
+    all_sids = set(positions.keys()) | set(sizes.keys())
+    updates = []
+    for sid in all_sids:
+        geo = _read_xml_geo(sid)
+        cur_y = geo["y"] if geo else 0
+        updates.append((sid, cur_y))
+    updates.sort(key=lambda x: -x[1])  # bottom-to-top
 
-    # Apply moves bottom-to-top (reverse order) to avoid offset invalidation
-    for sid, old_y, new_y in reversed(moves):
-        if new_y == old_y:
-            continue
-        span = _find_shape_span(xml_str, sid)
-        if not span:
-            continue
-        ss, se = span
-        shape_xml = xml_str[ss:se]
-        off_re = re.compile(
-            r'(<[^>]*?:off\b[^>]*?\bx\s*=\s*")(\d+)("[^>]*?\by\s*=\s*")(\d+)(")'
-        )
-        m = off_re.search(shape_xml)
-        if m:
-            shape_xml = off_re.sub(
-                lambda m_: m_.group(1) + m_.group(2) + m_.group(3) + str(new_y) + m_.group(5),
-                shape_xml, count=1
-            )
-            xml_str = xml_str[:ss] + shape_xml + xml_str[se:]
-            logger.info("    [gap-norm] id=%s: y %d -> %d (delta=%d)",
-                        sid, old_y, new_y, new_y - old_y)
-
-    return xml_str
-
-
-def _sync_overlay_positions(xml_str: str, all_shapes: list) -> str:
-    """Sync overlay shapes' y positions to match their parent image shapes.
-
-    Overlay shapes (e.g., Content Placeholders) sit on top of images. After
-    image resizing and gap normalization, overlays may have stale y positions.
-    This function identifies overlay-image pairs by matching cy values (already
-    synced by _detect_and_resize_overlays) and aligns the overlay's y to the
-    image's current y.
-
-    Args:
-        xml_str: full slide XML string
-        all_shapes: list of all shape dicts from config
-
-    Returns:
-        modified xml_str
-    """
-    off_pattern = re.compile(
-        r'<[^>]*?:off\b[^>]*?\bx\s*=\s*"(\d+)"[^>]*?\by\s*=\s*"(\d+)"'
+    off_write_re = re.compile(
+        r'(<[^>]*?:off\b[^>]*?\bx\s*=\s*")(\d+)("[^>]*?\by\s*=\s*")(\d+)(")'
     )
-    ext_pattern = re.compile(
-        r'<[^>]*?:ext\b[^>]*?\bcx\s*=\s*"(\d+)"[^>]*?\bcy\s*=\s*"(\d+)"'
+    ext_write_re = re.compile(
+        r'(<[^>]*?:ext\b[^>]*?\bcx\s*=\s*")(\d+)("[^>]*?\bcy\s*=\s*")(\d+)(")'
     )
 
-    # Read current geometry of all shapes from XML
-    shape_geos = {}
-    for s in all_shapes:
-        sid = str(s.get("shape_id", ""))
+    for sid, _ in updates:
         span = _find_shape_span(xml_str, sid)
-        if not span:
-            continue
-        snippet = xml_str[span[0]:span[1]]
-        off_m = off_pattern.search(snippet)
-        ext_m = ext_pattern.search(snippet)
-        if off_m and ext_m:
-            shape_geos[sid] = {
-                "x": int(off_m.group(1)), "y": int(off_m.group(2)),
-                "cx": int(ext_m.group(1)), "cy": int(ext_m.group(2)),
-                "category": s.get("category", ""),
-            }
-
-    # Identify image shapes and potential overlays
-    image_shapes = {sid: geo for sid, geo in shape_geos.items()
-                    if geo["category"] == "image"}
-    non_image_shapes = {sid: geo for sid, geo in shape_geos.items()
-                        if geo["category"] != "image" and geo["category"] != ""}
-
-    # Match overlays to images: an overlay has the same cy as an image and
-    # its x range falls within the image's x range
-    moves = []
-    for oid, ogeo in non_image_shapes.items():
-        for iid, igeo in image_shapes.items():
-            if abs(ogeo["cy"] - igeo["cy"]) <= 10 and ogeo["y"] != igeo["y"]:
-                # Check x overlap: overlay sits within image bounds
-                if (ogeo["x"] >= igeo["x"] - 10000 and
-                        ogeo["x"] + ogeo["cx"] <= igeo["x"] + igeo["cx"] + 10000):
-                    moves.append((oid, ogeo["y"], igeo["y"]))
-                    break
-
-    # Apply moves bottom-to-top
-    for oid, old_y, new_y in sorted(moves, key=lambda m: -m[1]):
-        span = _find_shape_span(xml_str, oid)
         if not span:
             continue
         ss, se = span
         shape_xml = xml_str[ss:se]
-        off_re = re.compile(
-            r'(<[^>]*?:off\b[^>]*?\bx\s*=\s*")(\d+)("[^>]*?\by\s*=\s*")(\d+)(")'
-        )
-        m = off_re.search(shape_xml)
-        if m:
-            shape_xml = off_re.sub(
-                lambda m_: m_.group(1) + m_.group(2) + m_.group(3) + str(new_y) + m_.group(5),
-                shape_xml, count=1
-            )
+        modified = False
+
+        # Update y position
+        if sid in positions:
+            new_y = positions[sid]
+            m = off_write_re.search(shape_xml)
+            if m and int(m.group(4)) != new_y:
+                shape_xml = off_write_re.sub(
+                    lambda m_: m_.group(1) + m_.group(2) + m_.group(3) + str(new_y) + m_.group(5),
+                    shape_xml, count=1
+                )
+                modified = True
+
+        # Update cy
+        if sid in sizes:
+            new_cy = sizes[sid]
+            m = ext_write_re.search(shape_xml)
+            if m and int(m.group(4)) != new_cy:
+                shape_xml = ext_write_re.sub(
+                    lambda m_: m_.group(1) + m_.group(2) + m_.group(3) + str(new_cy) + m_.group(5),
+                    shape_xml, count=1
+                )
+                modified = True
+
+        if modified:
             xml_str = xml_str[:ss] + shape_xml + xml_str[se:]
-            logger.info("    [ok] Overlay id=%s: synced y %d -> %d (matched parent image)",
-                        oid, old_y, new_y)
-
-    return xml_str
-
-
-def _check_slide_bounds(xml_str: str, all_shapes: list, images_with_geometry: list) -> str:
-    """Check if any shape exceeds slide bounds after image expansion and shifts.
-
-    If overflow exceeds 5%, scale all expanded image cy values proportionally
-    and redo shifts.
-
-    Args:
-        xml_str: full slide XML string
-        all_shapes: list of shape dicts from config
-        images_with_geometry: list of image dicts with _computed
-
-    Returns:
-        modified xml_str (unchanged if no overflow)
-    """
-    max_overflow = 0
-    for s in all_shapes:
-        sid = str(s.get("shape_id", ""))
-        span = _find_shape_span(xml_str, sid)
-        if span is None:
-            continue
-        ss, se = span
-        shape_xml = xml_str[ss:se]
-
-        off_pattern = re.compile(r'<[^>]*?:off\b[^>]*?\by\s*=\s*"(\d+)"')
-        ext_pattern = re.compile(r'<[^>]*?:ext\b[^>]*?\bcy\s*=\s*"(\d+)"')
-
-        off_m = off_pattern.search(shape_xml)
-        ext_m = ext_pattern.search(shape_xml)
-        if off_m and ext_m:
-            y = int(off_m.group(1))
-            cy = int(ext_m.group(1))
-            bottom = y + cy
-            if bottom > SLIDE_HEIGHT_EMU:
-                overflow = bottom - SLIDE_HEIGHT_EMU
-                max_overflow = max(max_overflow, overflow)
-
-    if max_overflow <= 0:
-        return xml_str
-
-    overflow_pct = max_overflow / SLIDE_HEIGHT_EMU
-    if overflow_pct > 0.05:
-        logger.warning("    [!] Slide overflow detected: %d EMU (%.1f%%). Scaling down images.",
-                        max_overflow, overflow_pct * 100)
-        # Scale factor to bring everything back within bounds
-        # We need to reduce the total overflow, so scale the expanded portion
-        scale = SLIDE_HEIGHT_EMU / (SLIDE_HEIGHT_EMU + max_overflow)
-        for img in images_with_geometry:
-            computed = img.get("_computed", {})
-            if computed.get("cy"):
-                computed["cy"] = int(computed["cy"] * scale)
-        return xml_str  # caller should re-apply geometries
-    else:
-        logger.warning("    [!] Minor slide overflow: %d EMU (%.1f%%) — within tolerance",
-                        max_overflow, overflow_pct * 100)
+            log_parts = []
+            if sid in positions:
+                log_parts.append(f"y={positions[sid]}")
+            if sid in sizes:
+                log_parts.append(f"cy={sizes[sid]}")
+            logger.info("    [layout] id=%s: %s", sid, ", ".join(log_parts))
 
     return xml_str
 
@@ -2560,165 +2354,27 @@ def inject(config_path: str = "configs/slides_examples.json", library_path: str 
                     with open(slide_xml_path, "rb") as f:
                         img_xml_str = f.read().decode("utf-8")
 
-                    # Item 12: Uniform image sizing — equalize cy for images in same column
-                    _unify_image_heights(images_with_geometry, slide["shapes"])
-
-                    # Read ALL original geometry from XML before modification.
-                    # NEVER use config geometry as "original" — update_config may
-                    # have already written target values there.
-                    _image_original_cys = {}
-                    _image_xml_geos = {}
-
+                    # Clear srcRect on dynamic images (reset cropping)
                     for img in images_with_geometry:
                         shape_id = str(img["target_shape_id"])
-                        computed = img["_computed"]
-                        # Find config geometry as fallback only
-                        original_geo = None
-                        for s in slide["shapes"]:
-                            if str(s.get("shape_id")) == shape_id:
-                                original_geo = s.get("geometry")
-                                break
-
-                        # Read original geometry from the actual XML (authoritative)
                         span = _find_shape_span(img_xml_str, shape_id)
                         if span:
-                            shape_xml_snippet = img_xml_str[span[0]:span[1]]
-                            ext_m = re.search(
-                                r'<[^>]*?:ext\b[^>]*?\bcx\s*=\s*"(\d+)"[^>]*?\bcy\s*=\s*"(\d+)"',
-                                shape_xml_snippet
-                            )
-                            off_m = re.search(
-                                r'<[^>]*?:off\b[^>]*?\bx\s*=\s*"(\d+)"[^>]*?\by\s*=\s*"(\d+)"',
-                                shape_xml_snippet
-                            )
-                            if ext_m and off_m:
-                                _image_xml_geos[shape_id] = {
-                                    "x": int(off_m.group(1)),
-                                    "y": int(off_m.group(2)),
-                                    "cx": int(ext_m.group(1)),
-                                    "cy": int(ext_m.group(2)),
-                                }
-                                _image_original_cys[shape_id] = int(ext_m.group(2))
-                        if shape_id not in _image_original_cys and original_geo:
-                            _image_original_cys[shape_id] = original_geo.get("cy", 0)
-                            _image_xml_geos[shape_id] = original_geo
+                            s_start, s_end = span
+                            shape_xml = img_xml_str[s_start:s_end]
+                            srcrect_pat = re.compile(r'<[^>]*?:srcRect\b[^>]*/>')
+                            srcrect_full = re.compile(r'<[^>]*?:srcRect\b[^>]*>.*?</[^>]*?:srcRect\s*>', re.DOTALL)
+                            if srcrect_full.search(shape_xml):
+                                shape_xml = srcrect_full.sub('<a:srcRect l="0" t="0" r="0" b="0"/>', shape_xml, count=1)
+                            elif srcrect_pat.search(shape_xml):
+                                shape_xml = srcrect_pat.sub('<a:srcRect l="0" t="0" r="0" b="0"/>', shape_xml, count=1)
+                            img_xml_str = img_xml_str[:s_start] + shape_xml + img_xml_str[s_end:]
 
-                        img_xml_str = _inject_image_geometry(
-                            img_xml_str, shape_id, computed, original_geo
-                        )
-                        new_y = computed.get("new_y")
-                        pos_info = f" at y={new_y}" if new_y is not None else ""
-                        logger.info("    [ok] Image shape id=%s: resized to %dx%d EMU%s",
-                                    shape_id, computed["cx"], computed["cy"], pos_info)
-
-                    # Items 5+9: Detect and resize overlays, then Items 1+14: auto-shift
-                    # IMPORTANT: Read ALL original geometry from XML, never from config.
-                    # Config geometry may have been pre-computed to target values by update_config.
-                    all_overlay_ids = set()
-                    for img in images_with_geometry:
-                        shape_id = str(img["target_shape_id"])
-                        computed = img["_computed"]
-
-                        # Read original geometry from XML (authoritative source)
-                        xml_geo = _image_xml_geos.get(shape_id)
-                        if not xml_geo:
-                            continue
-
-                        original_cy = xml_geo["cy"]
-                        original_cx = xml_geo["cx"]
-                        original_x = xml_geo["x"]
-                        original_y = xml_geo["y"]
-
-                        # Compute actual new_cy from pixel dimensions (same logic as _inject_image_geometry)
-                        img_w = computed.get("img_width_px", 0)
-                        img_h = computed.get("img_height_px", 0)
-                        if img_w and img_h and original_cx:
-                            aspect_cy = int(round(original_cx * (img_h / img_w)))
-                            new_cy = aspect_cy
-                        else:
-                            new_cy = computed.get("cy", original_cy)
-
-                        if new_cy != original_cy:
-                            # Detect and resize overlay shapes
-                            img_xml_str, overlay_ids = _detect_and_resize_overlays(
-                                img_xml_str, shape_id,
-                                original_x, original_y,
-                                original_cx, original_cy,
-                                new_cy, slide["shapes"]
-                            )
-                            all_overlay_ids.update(overlay_ids)
-
-                            # Auto-shift shapes below the image
-                            img_xml_str, shifted_ids = _auto_shift_below_image(
-                                img_xml_str, shape_id,
-                                original_x, original_y,
-                                original_cx, original_cy,
-                                new_cy, slide["shapes"],
-                                overlay_ids=all_overlay_ids
-                            )
-                            all_overlay_ids.update(shifted_ids)
-
-                    # Reposition and resize shapes moved by auto-stacking
-                    # (labels, static images, etc.) — config geometry was updated by update_config
-                    # Skip shapes already handled by _inject_image_geometry or auto-shift
-                    _skip_ids = {str(img["target_shape_id"]) for img in images_with_geometry}
-                    _skip_ids.update(all_overlay_ids)  # includes shifted + overlay IDs
-                    for s in slide["shapes"]:
-                        if not s.get("geometry"):
-                            continue
-                        shape_id = str(s.get("shape_id", ""))
-                        if shape_id in _skip_ids:
-                            continue  # already handled
-                        new_y = s["geometry"].get("y")
-                        new_cy = s["geometry"].get("cy")
-                        if new_y is None:
-                            continue
-                        span = _find_shape_span(img_xml_str, shape_id)
-                        if not span:
-                            continue
-                        ss, se = span
-                        shape_xml = img_xml_str[ss:se]
-                        modified = False
-
-                        # Update Y position
-                        off_pattern = re.compile(
-                            r'(<[^>]*?:off\b[^>]*?\bx\s*=\s*")(\d+)("[^>]*?\by\s*=\s*")(\d+)(")'
-                        )
-                        m = off_pattern.search(shape_xml)
-                        if m and int(m.group(4)) != new_y:
-                            shape_xml = off_pattern.sub(
-                                lambda m: m.group(1) + m.group(2) + m.group(3) + str(new_y) + m.group(5),
-                                shape_xml, count=1
-                            )
-                            modified = True
-
-                        # Update height (cy) if changed — for static images scaled by stacker
-                        if new_cy is not None:
-                            ext_pattern = re.compile(
-                                r'(<[^>]*?:ext\b[^>]*?\bcx\s*=\s*")(\d+)("[^>]*?\bcy\s*=\s*")(\d+)(")'
-                            )
-                            ext_m = ext_pattern.search(shape_xml)
-                            if ext_m and int(ext_m.group(4)) != new_cy:
-                                shape_xml = ext_pattern.sub(
-                                    lambda m: m.group(1) + m.group(2) + m.group(3) + str(new_cy) + m.group(5),
-                                    shape_xml, count=1
-                                )
-                                modified = True
-
-                        if modified:
-                            img_xml_str = img_xml_str[:ss] + shape_xml + img_xml_str[se:]
-                            logger.info("    [ok] Shape id=%s: repositioned to y=%d, cy=%d",
-                                        shape_id, new_y, new_cy or 0)
-
-                    # Normalize gaps between stacked images in the same column
-                    image_ids = [str(img["target_shape_id"]) for img in images_with_geometry]
-                    img_xml_str = _normalize_image_gaps(img_xml_str, image_ids, slide["shapes"])
-
-                    # Sync overlay shapes (Content Placeholders etc.) to their parent images
-                    img_xml_str = _sync_overlay_positions(img_xml_str, slide["shapes"])
-
-                    # Item 11: Slide bounds checking — warn and scale if overflow > 5%
-                    img_xml_str = _check_slide_bounds(img_xml_str, slide["shapes"], images_with_geometry)
+                    # Single consolidated layout pass — computes final cy for
+                    # every image, lays out labels + images top-to-bottom,
+                    # and applies all y/cy changes to XML in one pass.
+                    img_xml_str = _layout_image_sections(
+                        img_xml_str, images_with_geometry, slide["shapes"]
+                    )
 
                     with open(slide_xml_path, "wb") as f:
                         f.write(img_xml_str.encode("utf-8"))
