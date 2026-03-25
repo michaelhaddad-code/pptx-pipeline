@@ -1531,6 +1531,12 @@ def _layout_image_sections(xml_str: str, images_with_geometry: list,
         return None
 
     # ── STEP 1: Compute final cy for every dynamic image ──
+    # Compare the replacement image's aspect ratio against the original
+    # placeholder's aspect ratio.  If they're similar (within 5%), the image
+    # is effectively the same shape — keep the original cy to avoid rounding-
+    # induced relayout.  Only resize when the aspect ratio actually changed.
+    ASPECT_TOLERANCE = 0.05  # 5% tolerance
+
     dynamic_ids = set()
     final_cys = {}  # shape_id -> final cy
     for img in images_with_geometry:
@@ -1542,8 +1548,15 @@ def _layout_image_sections(xml_str: str, images_with_geometry: list,
             continue
         img_w = computed.get("img_width_px", 0)
         img_h = computed.get("img_height_px", 0)
-        if img_w and img_h and geo["cx"]:
-            final_cys[sid] = int(round(geo["cx"] * (img_h / img_w)))
+        if img_w and img_h and geo["cx"] and geo["cy"]:
+            new_aspect = img_h / img_w
+            orig_aspect = geo["cy"] / geo["cx"]
+            if abs(new_aspect - orig_aspect) / max(orig_aspect, 1e-9) <= ASPECT_TOLERANCE:
+                # Aspect ratios are close enough — keep original box size
+                final_cys[sid] = geo["cy"]
+            else:
+                # Aspect ratio changed — resize to fit width proportionally
+                final_cys[sid] = int(round(geo["cx"] * new_aspect))
         else:
             final_cys[sid] = computed.get("cy", geo["cy"])
 
@@ -1580,6 +1593,21 @@ def _layout_image_sections(xml_str: str, images_with_geometry: list,
     for sid, geo in col_images:
         if sid not in final_cys:
             final_cys[sid] = geo["cy"]
+
+    # ── Guard: skip layout pass if no image actually changed size ──
+    # Only run stacking/shifting when an image expanded or shrunk significantly.
+    # A tolerance of 20000 EMU (~1.6pt) absorbs rounding differences between
+    # pixel-based aspect-ratio math and the original EMU dimensions.
+    CY_TOLERANCE = 20000
+    any_size_changed = False
+    for sid, geo in col_images:
+        if sid in dynamic_ids:
+            if abs(final_cys[sid] - geo["cy"]) > CY_TOLERANCE:
+                any_size_changed = True
+                break
+    if not any_size_changed:
+        logger.info("    [layout] no image size changes detected, skipping relayout")
+        return xml_str
 
     # ── Build set of group-child shape ids to skip ──
     group_child_ids = {str(s.get("shape_id", "")) for s in all_shapes if s.get("parent_group")}

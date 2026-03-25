@@ -1,17 +1,4 @@
 {
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -c 'FILE=\"$CLAUDE_FILE_PATH\"; case \"$FILE\" in */component_library/_raw/*) echo \"BLOCKED: Do not manually edit _raw/ files. Use pipeline scripts instead.\"; exit 1;; */component_library/media/*) echo \"BLOCKED: Do not manually edit media files. Use replace_image.py instead.\"; exit 1;; */configs/*_mappings.json) exit 0;; */configs/*.json) echo \"BLOCKED: Do not manually edit config files. Write mappings.json via /map, then run /update-config.\"; exit 1;; *) exit 0;; esac'"
-          }
-        ]
-      }
-    ]
-  },
   "permissions": {
     "allow": [
       "Bash(python -c \"import inject; import reconstruct; import update_config; import generate_config; import deconstruct; print\\('All modules import successfully'\\)\")",
@@ -50,7 +37,34 @@
       "Skill(generate-config)",
       "Skill(map)",
       "Skill(update-config)",
-      "Skill(reconstruct)"
+      "Skill(reconstruct)",
+      "Bash(python -c \":*)",
+      "Bash(LIB=\"C:/Users/MichaelHaddad/Desktop/test2results/component_library\")",
+      "Bash(rm -rf \"$LIB/_raw\")",
+      "Bash(cp -r \"$LIB/_raw_clean\" \"$LIB/_raw\")",
+      "Bash(python3:*)",
+      "Bash(mkdir -p \"/c/Users/MichaelHaddad/Desktop/test4results/data\")",
+      "Bash(cp \"/c/Users/MichaelHaddad/Desktop/c9697e01-3de0-47e5-b0ab-850b814b0c54.jpg\" \"/c/Users/MichaelHaddad/Desktop/330dc62f-2a68-4354-9abf-a94cae5c8785.jpg\" \"/c/Users/MichaelHaddad/Desktop/test4results/data/\")",
+      "Bash(cp -f \"C:/Users/MichaelHaddad/Desktop/test4results/component_library/_raw_clean/ppt/slides/slide3.xml\" \"C:/Users/MichaelHaddad/Desktop/test4results/component_library/_raw/ppt/slides/slide3.xml\")",
+      "Bash(cp -f \"C:/Users/MichaelHaddad/Desktop/test4results/component_library/_raw_clean/ppt/media/image45.png\" \"C:/Users/MichaelHaddad/Desktop/test4results/component_library/_raw/ppt/media/image45.png\")",
+      "Bash(cp -f \"C:/Users/MichaelHaddad/Desktop/test4results/component_library/_raw_clean/ppt/media/image46.png\" \"C:/Users/MichaelHaddad/Desktop/test4results/component_library/_raw/ppt/media/image46.png\")",
+      "Bash(mkdir -p \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\test5results\\\\data\")",
+      "Bash(cp \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\testData\\\\330dc62f-2a68-4354-9abf-a94cae5c8785.jpg\" \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\test5results\\\\data/image1.jpg\")",
+      "Bash(cp \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\testData\\\\c9697e01-3de0-47e5-b0ab-850b814b0c54.jpg\" \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\test5results\\\\data/image2.jpg\")",
+      "Bash(cp \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\testData\\\\042858f4-7206-46dc-b2a8-7d9579115e70.jpg\" \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\test5results\\\\data/image3.jpg\")"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'FILE=\"$CLAUDE_FILE_PATH\"; case \"$FILE\" in */component_library/_raw/*) echo \"BLOCKED: Do not manually edit _raw/ files. Use pipeline scripts instead.\"; exit 1;; */component_library/media/*) echo \"BLOCKED: Do not manually edit media files. Use replace_image.py instead.\"; exit 1;; */configs/*_mappings.json) exit 0;; */configs/*.json) echo \"BLOCKED: Do not manually edit config files. Write mappings.json via /map, then run /update-config.\"; exit 1;; *) exit 0;; esac'"
+          }
+        ]
+      }
     ]
   }
 }

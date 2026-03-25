@@ -56,7 +56,8 @@ configs/                 # Output of generate-config, updated by update-config
 
 data/                    # User-provided data files for injection
   *.csv, *.json, *.xlsx  # Scalar/tabular data
-  *.png, *.jpg           # Replacement images
+  visuals/               # Replacement images (must be here, not in data/ root)
+    *.png, *.jpg         # Image files registered by update_config as visual:<stem>
 
 recipes/                 # Saved mapping recipes for reuse
 ```
@@ -64,6 +65,19 @@ recipes/                 # Saved mapping recipes for reuse
 ## Critical Rule: No Manual Edits
 
 **NEVER manually edit XML, config, media, or any pipeline files by hand.** All changes must go through pipeline scripts (`inject.py`, `replace_image.py`, `update_config.py`, etc.) or by writing/updating code first, then running it programmatically. If no existing script can accomplish the task, write or extend one — then execute it. This applies to every kind of modification: text, images, layout, config fields, slide XML — everything.
+
+## Mappings Rules
+
+These rules apply when writing `_mappings.json` and running the pipeline:
+
+- **Images must go in `data/visuals/`**: `update_config.py` scans `data/visuals/` to register images. Images placed directly in `data/` will not be found. In mappings, set `source` to just the filename (e.g., `"image1.jpg"`), not a full path.
+- **Literal text values use `literal:` prefix**: When a shape's value is a direct string (not a lookup from a data file), set `data_field` to `"literal:Your Text"`. Without the prefix, `update_config` tries to look it up in loaded data and fails silently.
+- **`target_run` must be an integer**: `inject.py` uses `target_run` as a zero-based run index (e.g., `1` = second `<a:t>` element in the shape). Dict-style `{"search","replace"}` is not supported and will be silently ignored.
+- **Never manually patch config fields**: Always let `update_config.py` handle resolution and layout computation (`resolved_value`, `resolved_source`, `_computed`). Manually setting these bypasses image geometry calculation, font sizing, and content stacking — causing broken output.
+
+## Rerun Rule: Always Rerun Full Pipeline on Issues
+
+**When the user reports an issue with the output, always rerun the full pipeline from step 1 (or at minimum from step 2: generate-config → update-config → inject → reconstruct).** Never rerun only a single step, because earlier steps compute state that later steps depend on (e.g., `update_config` computes `_computed` layouts that `inject` needs). Skipping steps risks missing critical computations and producing the same broken output.
 
 ## Key Architecture Decisions
 
