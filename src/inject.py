@@ -2089,6 +2089,40 @@ def inject_slide(slide_xml_path: str, shapes_to_inject: list, dry_run: bool = Fa
                     total_replacements += 1
                     logger.info("    [ok] %s (id=%s): replaced [target_run=%d]", shape_name, shape_id, target_run)
                     logger.info("      -> '%s'", resolved_value[:80])
+
+                    # Font sizing after target_run replacement
+                    layout = shape.get("layout", {})
+                    computed = layout.get("_computed")
+                    max_font_size = layout.get("max_font_size")
+                    if computed and computed.get("font_size") and max_font_size and computed["font_size"] < max_font_size:
+                        target_sz = computed["font_size"]
+                        new_span = _find_shape_span(xml_str, shape_id)
+                        if new_span is not None:
+                            s, e = new_span
+                            fitted = _apply_text_autofit(xml_str[s:e], target_sz)
+                            xml_str = xml_str[:s] + fitted + xml_str[e:]
+                            _xml_dirty = True
+                        logger.info("    [ok] %s (id=%s): target_run auto-fit font=%d", shape_name, shape_id, target_sz)
+                    elif len(resolved_value) > len(am.group(2)):
+                        geo = shape.get("geometry", {})
+                        shape_cx = geo.get("cx", 0)
+                        shape_cy = geo.get("cy", 0)
+                        max_sz = layout.get("max_font_size", 3200)
+                        min_sz = layout.get("min_font_size", 400)
+                        if shape_cx > 0 and shape_cy > 0:
+                            from layout import compute_text_font_scale
+                            target_sz = compute_text_font_scale(
+                                resolved_value, shape_cx, shape_cy,
+                                max_sz, min_sz, max_sz
+                            )
+                            if target_sz < max_sz:
+                                new_span = _find_shape_span(xml_str, shape_id)
+                                if new_span is not None:
+                                    s, e = new_span
+                                    fitted = _apply_text_autofit(xml_str[s:e], target_sz)
+                                    xml_str = xml_str[:s] + fitted + xml_str[e:]
+                                    _xml_dirty = True
+                                logger.info("    [ok] %s (id=%s): target_run computed font=%d", shape_name, shape_id, target_sz)
                     continue
                 else:
                     logger.warning("    [!] %s (id=%s): target_run=%d out of range (%d runs), falling back",
@@ -2108,7 +2142,7 @@ def inject_slide(slide_xml_path: str, shapes_to_inject: list, dry_run: bool = Fa
                 computed = layout.get("_computed")
                 new_len = len(resolved_value)
 
-                max_font_size = shape.get("max_font_size")
+                max_font_size = layout.get("max_font_size") or shape.get("max_font_size")
 
                 if computed and computed.get("font_size") and max_font_size and computed["font_size"] < max_font_size:
                     # Overflow detected: pre-computed font size is smaller than max — apply auto-fit

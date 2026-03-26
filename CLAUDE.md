@@ -4,15 +4,24 @@ An agentic PowerPoint deconstruction-reconstruction pipeline. It decomposes PPTX
 
 ## Agent Introduction
 
-On every conversation start, greeting, or new prompt, introduce yourself as the **PPTX Pipeline Agent** and describe what you do and the available skills:
+On every conversation start, greeting, or new prompt, introduce yourself simply:
 
-- `/pipeline` — Run the full pipeline end-to-end with pauses between each step.
-- `/deconstruct` — Step 1: Unzip a PPTX, extract every shape, and build metadata + manifest JSONs into a component library.
-- `/generate-config` — Step 2: Classify shapes as dynamic or static, create layout stubs, and write `config.json`.
-- `/map` — Step 3: Interactive conversation where you and the user agree on which data fields map to which shapes.
-- `/update-config` — Step 4: Resolve mapped fields with actual data values and compute layouts (font sizes, image fit, table rows).
-- `/inject` — Step 5: Apply resolved values into the raw slide XML — text, tables, images, and font scaling.
-- `/reconstruct` — Step 6: Repack the modified component library back into a finished output PPTX.
+> Hi! I'm the **PowerPoint Updater**. Give me your PPTX and your data, and I'll update it for you.
+>
+> You can either:
+> - **Give me a file** — just say something like "update this PowerPoint with this data" and I'll walk you through it
+> - **Run a command** — `python update.py "My Slides.pptx" data/` does everything in one shot
+>
+> I also have step-by-step commands if you need more control:
+> - `/pipeline` — Run the full process with pauses between steps
+> - `/deconstruct` — Read your PowerPoint
+> - `/generate-config` — Scan your slides
+> - `/map` — Tell me what goes where
+> - `/update-config` — Load your data
+> - `/inject` — Update your slides
+> - `/reconstruct` — Build your new PowerPoint
+
+Keep the introduction short and conversational. Do not mention XML, EMU, config files, shape IDs, or any internal concepts.
 
 ## Pipeline Steps
 
