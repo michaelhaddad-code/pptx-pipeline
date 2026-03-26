@@ -1,36 +1,30 @@
 ---
 name: map
-description: "Step 3: Interactive mapping — conversationally map data fields to shapes. Replaces auto_map. Use after /generate-config."
+description: "Step 2: Interactive mapping — tell the agent what to change in your slides. The conversational step between reading and updating."
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
-# Step 3: Interactive Mapping
+# Step 2 — Tell Me What Goes Where
 
-Map data fields to presentation shapes through conversation with the user.
+Interactive mapping conversation. The user describes what they want changed, and the agent figures out which shapes and data to connect.
 
 ## Instructions
 
 This step is **interactive**. Do NOT auto-complete — work with the user step by step.
 
-### Phase 1: Inventory
+### Phase 1: Show What's Available
 
-1. Find the config file (look in configs/ for the most recent one):
+1. Find the config file:
 
 ```python
 import json, glob
-config_files = glob.glob("configs/*.json")
-# Exclude mappings files
-config_files = [f for f in config_files if "_mappings" not in f and "mappings.json" not in f]
-```
-
-2. Load the config to get all shapes (read-only — do NOT modify the config):
-
-```python
+config_files = [f for f in glob.glob("configs/*.json") if "_mappings" not in f]
+config_path = sorted(config_files)[-1]
 with open(config_path) as f:
     cfg = json.load(f)
 ```
 
-3. Load the data schema from the data/ directory:
+2. Load the data from data/:
 
 ```python
 import os
@@ -38,39 +32,46 @@ data_dir = "data"
 data_files = os.listdir(data_dir) if os.path.exists(data_dir) else []
 ```
 
-For each data file, show its contents/structure (field names, sample values, image files).
-
-4. Present TWO lists side by side to the user:
-
-**Available Data:**
-- Scalar fields (from CSVs/JSONs): field name, sample value
-- Tabular sources: file name, columns, row count
-- Images: file names
-
-**Shapes Needing Mapping (per slide):**
-- Shape id, name, category, text preview
-- For images: current image target, nearby text labels
+3. Present what's available in **plain English**:
+   - Per slide: describe what's on it (text content, images, tables) — NO shape IDs in the initial presentation
+   - Available data: file names, field names, sample values, image files
+   - Keep it conversational: "Slide 3 has a title, some quality metrics, quadrant labels, and 3 chart images"
 
 ### Phase 2: Mapping Conversation
 
-5. Go slide by slide. For each slide with shapes:
-   - Show the shapes and ask the user which data field each one maps to
-   - For images: ask which replacement image goes where
-   - For tables: ask which tabular data source feeds the table
-   - Confirm each mapping before moving on
+4. Let the user describe what they want in natural language. They might say:
+   - "Replace the title date with 'March 15'"
+   - "Swap the bar chart on slide 3 with my new one"
+   - "Put the pipeline data in that table on slide 8"
+   - "Change the quadrant numbers to 2, 3, 4, 5"
+   - "Skip slide 4"
 
-6. If the user provides a screenshot of the slide, use it to understand the visual layout and suggest mappings.
+5. When the user references a shape, use your knowledge of the config to find the right shape internally. If ambiguous, describe the options in plain English and ask the user to clarify.
 
-7. The user may say things like:
-   - "shape 12 maps to revenue_field"
-   - "the top-right chart gets replaced with tom_jerry.png"
-   - "skip this slide"
-   - "that table gets the execution_data.csv"
-   - "replace image 31 with my_image.jpg"
+6. If the user provides a screenshot, use it to understand the layout and help identify shapes.
 
-### Phase 3: Write Mappings File
+7. For images the user wants to replace:
+   - Copy the image to `data/visuals/` if it's not already there
+   - Use the filename (without extension) as the visual identifier
 
-8. Once all mappings are agreed, write them to `configs/<deck>_mappings.json`:
+8. For text that needs XML run targeting (e.g., replacing just "xxx" in a longer string), read the slide XML to find the correct target_run index. Do this silently — the user doesn't need to know about runs.
+
+### Phase 3: Confirm and Write Mappings
+
+9. Before writing anything, show a **simple confirmation table** to the user:
+
+```
+Here's what I'll update:
+
+| Slide | What | New Value |
+|-------|------|-----------|
+| 3 | Title date | "tpid" |
+| 3 | Quadrant a | 2 |
+| 3 | Quadrant b | 3 |
+| 3 | Bar chart | your_image.jpg |
+```
+
+10. Once confirmed, write mappings to `configs/<deck>_mappings.json`:
 
 ```python
 import json
@@ -80,31 +81,14 @@ mappings = {
     "deck": "<deck_name>",
     "created": datetime.now().isoformat(),
     "mappings": [
-        # Text mapping example:
-        {
-            "slide": "slide_2",
-            "shape_id": "5",
-            "type": "text",
-            "data_field": "report_title"
-        },
-        # Image mapping example:
-        {
-            "slide": "slide_3",
-            "shape_id": "32",
-            "type": "image",
-            "source": "visual:my_image"
-        },
-        # Table mapping example:
-        {
-            "slide": "slide_7",
-            "shape_id": "7",
-            "type": "table",
-            "data_field": "execution_data"
-        }
+        # Text: {"slide": "slide_N", "shape_id": "ID", "type": "text", "data_field": "literal:value"}
+        # Text with target_run: add "target_run": N
+        # Image: {"slide": "slide_N", "shape_id": "ID", "type": "image", "source": "visual:filename_stem"}
+        # Table: {"slide": "slide_N", "shape_id": "ID", "type": "table", "data_field": "source_name"}
     ]
 }
 
-with open("configs/<deck>_mappings.json", "w") as f:
+with open(f"configs/{deck}_mappings.json", "w") as f:
     json.dump(mappings, f, indent=2)
 ```
 
@@ -115,20 +99,13 @@ The `type` field must be one of: `"text"`, `"image"`, `"table"`.
 - Image mappings use `source` (`visual:name`, `screenshot:dir/key`, or bare filename path).
 - Presence in mappings.json implies the shape is dynamic — no `is_dynamic` field needed.
 
-9. Optionally save the mapping as a recipe for reuse:
-
-```python
-import shutil
-shutil.copy("configs/<deck>_mappings.json", "recipes/<deck>_recipe.json")
-```
-
-10. Present a final summary of all mappings and tell the user to run `/update-config` next.
+11. After writing, say: **"Got it! Ready to update your slides?"**
 
 ## Important
 
 - **NEVER edit the config file** — only write mappings.json
-- ALWAYS pause and ask the user before writing mappings
-- Show what you're about to write and get confirmation
-- If the user is unsure about a mapping, skip it and come back later
-- Keep track of unmapped shapes and remind the user at the end
-- The config is read-only during this step — used only to display shape info
+- **NEVER show shape IDs** to the user unless they specifically ask for technical details
+- Describe shapes by their content: "the title", "the bar chart on the left", "the table at the bottom"
+- ALWAYS pause and confirm the mapping table before writing
+- If the user is unsure, skip it and come back later
+- Keep the conversation natural — the user shouldn't need to know about shape IDs, XML, or config internals

@@ -51,7 +51,11 @@
       "Bash(mkdir -p \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\test5results\\\\data\")",
       "Bash(cp \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\testData\\\\330dc62f-2a68-4354-9abf-a94cae5c8785.jpg\" \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\test5results\\\\data/image1.jpg\")",
       "Bash(cp \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\testData\\\\c9697e01-3de0-47e5-b0ab-850b814b0c54.jpg\" \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\test5results\\\\data/image2.jpg\")",
-      "Bash(cp \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\testData\\\\042858f4-7206-46dc-b2a8-7d9579115e70.jpg\" \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\test5results\\\\data/image3.jpg\")"
+      "Bash(cp \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\testData\\\\042858f4-7206-46dc-b2a8-7d9579115e70.jpg\" \"C:\\\\Users\\\\MichaelHaddad\\\\Desktop\\\\test5results\\\\data/image3.jpg\")",
+      "mcp__claude_ai_Mermaid_Chart__validate_and_render_mermaid_diagram",
+      "Skill(all)",
+      "Bash(mkdir -p data/visuals)",
+      "Bash(cp \"C:/Users/MichaelHaddad/Desktop/testData/c9697e01-3de0-47e5-b0ab-850b814b0c54.jpg\" data/visuals/)"
     ]
   },
   "hooks": {
